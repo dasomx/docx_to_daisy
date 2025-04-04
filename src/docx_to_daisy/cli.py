@@ -2,6 +2,7 @@ import zipfile
 import os
 import uuid
 import argparse
+import re
 from docx import Document  # python-docx 라이브러리
 from lxml import etree  # lxml 라이브러리
 from datetime import datetime
@@ -9,20 +10,53 @@ from .markers import MarkerProcessor  # 마커 처리기 임포트
 
 
 def split_text_to_words(text):
-    """텍스트를 단어 단위로 분리합니다."""
-    words = text.split()
+    """텍스트를 단어로 분리하는 함수
+    
+    Args:
+        text (str): 분리할 텍스트
+        
+    Returns:
+        list: 분리된 단어들의 리스트
+    """
+    # 문장 부호 패턴 정의
+    punctuation_pattern = r'[.。,，!！?？:：;；]'
+
+    # 1. 먼저 공백으로 단어들을 분리
+    words = text.strip().split()
+
     result = []
     for word in words:
-        if word.startswith(('(', '[', '{', '<')):
-            result.append(word[0])
-            if len(word) > 1:
-                result.append(word[1:])
-        elif word.endswith((')', ']', '}', '>', '.', ',', ':', ';', '!', '?')):
-            if len(word) > 1:
-                result.append(word[:-1])
-            result.append(word[-1])
-        else:
-            result.append(word)
+        # 2. 각 단어에서 문장 부호가 있는지 확인
+        if re.search(punctuation_pattern, word):
+            # 문장 부호가 단어 중간에 있는 경우는 그대로 유지
+            if not re.match(f'^{punctuation_pattern}', word) and not re.search(f'{punctuation_pattern}$', word):
+                result.append(word)
+                continue
+
+            # 문장 부호로 시작하는 경우
+            if re.match(f'^{punctuation_pattern}', word):
+                punct = re.match(f'^({punctuation_pattern}+)', word).group(1)
+                remaining = word[len(punct):]
+                if punct:
+                    result.append(punct)
+                if remaining:
+                    result.append(remaining)
+                continue
+
+            # 문장 부호로 끝나는 경우
+            if re.search(f'{punctuation_pattern}$', word):
+                match = re.search(f'({punctuation_pattern}+)$', word)
+                punct = match.group(1)
+                text_part = word[:-len(punct)]
+                if text_part:
+                    result.append(text_part + punct)  # 문장 부호를 단어에 붙임
+                else:
+                    result.append(punct)
+                continue
+
+        # 문장 부호가 없는 일반 단어
+        result.append(word)
+
     return result
 
 
@@ -64,12 +98,82 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     element_counter = 0
     sent_counter = 0
 
+    # 이미지 저장 디렉토리 생성
+    images_dir = os.path.join(output_dir, "images")
+    os.makedirs(images_dir, exist_ok=True)
+
+    # 이미지 처리
+    image_counter = 0
+    print("\n이미지 처리 시작...")
+
+    # 문서의 모든 이미지 관계와 위치 매핑
+    image_locations = {}  # rId -> paragraph index 매핑
+    for para_idx, para in enumerate(document.paragraphs):
+        for run in para.runs:
+            if hasattr(run, '_element') and run._element.find('.//a:blip', {'a': 'http://schemas.openxmlformats.org/drawingml/2006/main'}) is not None:
+                blip = run._element.find(
+                    './/a:blip', {'a': 'http://schemas.openxmlformats.org/drawingml/2006/main'})
+                rId = blip.get(
+                    '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
+                if rId:
+                    image_locations[rId] = para_idx
+
+    # 문서의 모든 이미지 관계 처리
+    print("\n1. 문서의 이미지 관계 확인 중...")
+    for rel in document.part.rels.values():
+        print(f"  관계 타입: {rel.reltype}")
+        if "image" in rel.reltype:
+            try:
+                image_counter += 1
+                element_counter += 1
+                sent_counter += 1
+                elem_id = f"id_{element_counter}"
+                sent_id = f"id_{sent_counter}"
+
+                # 이미지 파일 저장
+                image_filename = f"image_{image_counter}{os.path.splitext(rel.target_part.partname)[1]}"
+                image_path = os.path.join(images_dir, image_filename)
+
+                print(f"  이미지 {image_counter} 발견:")
+                print(f"    - 파일명: {image_filename}")
+                print(f"    - 저장 경로: {image_path}")
+                print(f"    - 관계 ID: {rel.rId}")
+
+                with open(image_path, "wb") as f:
+                    f.write(rel.target_part.blob)
+
+                # 이미지 설명 찾기
+                alt_text = f"이미지 {image_counter}"
+
+                # 이미지의 위치 찾기
+                para_idx = image_locations.get(
+                    rel.rId, len(document.paragraphs))
+
+                content_structure.append({
+                    "type": "imggroup",
+                    "image_src": f"images/{image_filename}",
+                    "alt_text": alt_text,
+                    "id": elem_id,
+                    "sent_id": sent_id,
+                    "level": 0,
+                    "markers": [],
+                    "smil_file": "mo.smil",
+                    "position": para_idx,
+                    "insert_before": True  # 단락 앞에 이미지 삽입
+                })
+
+                print(f"    - 이미지 위치: 단락 {para_idx}")
+                print(f"    - 이미지 추출 완료")
+            except Exception as e:
+                print(f"    - 오류 발생: {str(e)}")
+
+    print(f"\n총 {image_counter}개의 이미지 처리 완료")
+    print("이미지 처리 종료\n")
+
     # DOCX의 단락(paragraph)을 순회하며 구조 파악
     print("DOCX 파일 분석 중...")
-    for para in document.paragraphs:
+    for para_idx, para in enumerate(document.paragraphs):
         text = para.text.strip()
-        if not text:  # 내용이 없는 단락은 건너뜀
-            continue
 
         # 마커 처리
         processed_text, markers = MarkerProcessor.process_text(text)
@@ -89,7 +193,9 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                     "sent_id": sent_id,
                     "level": 0,
                     "markers": [marker],
-                    "smil_file": "mo.smil"
+                    "smil_file": "mo.smil",
+                    "position": para_idx,
+                    "insert_before": True  # 단락 앞에 페이지 번호 삽입
                 })
 
         if not processed_text.strip():  # 마커만 있고 실제 내용이 없는 경우 건너뜀
@@ -105,50 +211,28 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
         words = split_text_to_words(processed_text)
 
         # 스타일 이름에 따른 구조 매핑
-        if style_name.startswith('heading 1') or style_name == '제목 1':
-            content_structure.append({
-                "type": "h1",
-                "text": processed_text,
-                "words": words,
-                "id": elem_id,
-                "sent_id": sent_id,
-                "level": 1,
-                "markers": markers,
-                "smil_file": "mo.smil"
-            })
-        elif style_name.startswith('heading 2') or style_name == '제목 2':
-            content_structure.append({
-                "type": "h2",
-                "text": processed_text,
-                "words": words,
-                "id": elem_id,
-                "sent_id": sent_id,
-                "level": 2,
-                "markers": markers,
-                "smil_file": "mo.smil"
-            })
-        elif style_name.startswith('heading 3') or style_name == '제목 3':
-            content_structure.append({
-                "type": "h3",
-                "text": processed_text,
-                "words": words,
-                "id": elem_id,
-                "sent_id": sent_id,
-                "level": 3,
-                "markers": markers,
-                "smil_file": "mo.smil"
-            })
-        else:  # 기본적으로 'p' (문단)으로 처리
-            content_structure.append({
-                "type": "p",
-                "text": processed_text,
-                "words": words,
-                "id": elem_id,
-                "sent_id": sent_id,
-                "level": 0,
-                "markers": markers,
-                "smil_file": "mo.smil"
-            })
+        content_structure.append({
+            "type": "h1" if style_name.startswith('heading 1') or style_name == '제목 1' else
+            "h2" if style_name.startswith('heading 2') or style_name == '제목 2' else
+            "h3" if style_name.startswith('heading 3') or style_name == '제목 3' else
+            "p",
+            "text": processed_text,
+            "words": words,
+            "id": elem_id,
+            "sent_id": sent_id,
+            "level": 1 if style_name.startswith('heading 1') or style_name == '제목 1' else
+                    2 if style_name.startswith('heading 2') or style_name == '제목 2' else
+                    3 if style_name.startswith('heading 3') or style_name == '제목 3' else
+                    0,
+            "markers": markers,
+            "smil_file": "mo.smil",
+            "position": para_idx,
+            "insert_before": False  # 일반 텍스트는 순서대로 삽입
+        })
+
+    # 콘텐츠를 위치에 따라 정렬
+    content_structure.sort(key=lambda x: (
+        x["position"], not x["insert_before"]))
 
     print(f"총 {len(content_structure)}개의 구조 요소 분석 완료.")
 
@@ -258,6 +342,44 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                 page=str(item["text"])
             )
             pagenum.text = str(item["text"])
+            continue
+        elif item["type"] == "imggroup":
+            # 이미지는 현재 문서 구조의 적절한 레벨에 추가
+            if current_level1 is None:
+                # level1이 없는 경우 생성
+                current_level1 = etree.SubElement(dtbook_bodymatter, "level1")
+                current_level = 1
+                # 임시 제목 추가
+                temp_h1 = etree.SubElement(current_level1, "h1")
+                temp_h1.text = "제목 없음"
+
+            # 현재 레벨에 따라 적절한 부모 요소 찾기
+            if current_level == 0 or current_level == 1:
+                parent = current_level1
+            else:
+                # level2, level3의 경우 현재 레벨에 맞는 부모 찾기
+                parent = current_level1
+                for l in range(2, current_level + 1):
+                    level_elem = parent.find(f"level{l}")
+                    if level_elem is not None:
+                        parent = level_elem
+
+            imggroup = etree.SubElement(
+                parent,
+                "imggroup",
+                id=item["id"]
+            )
+            img = etree.SubElement(imggroup, "img",
+                                   id=f"{item['id']}_img",
+                                   src=item["image_src"],
+                                   alt=item["alt_text"])
+            caption = etree.SubElement(imggroup, "caption",
+                                       id=f"{item['id']}_caption")
+            sent = etree.SubElement(caption, "sent",
+                                    id=item["sent_id"],
+                                    smilref=f"{item['smil_file']}#s{item['sent_id']}")
+            w = etree.SubElement(sent, "w")
+            w.text = item["alt_text"]
             continue
 
         if item["type"].startswith("h"):
@@ -453,6 +575,30 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     spine = etree.SubElement(opf_root, "spine")
     etree.SubElement(spine, "itemref",
                      idref="mo")
+
+    # OPF Manifest에 이미지 파일 추가
+    for item in content_structure:
+        if item["type"] == "imggroup":
+            image_filename = os.path.basename(item["image_src"])
+            image_id = f"img_{item['id']}"
+            extension = os.path.splitext(image_filename)[1][1:].lower()
+
+            # 이미지 확장자에 따른 MIME 타입 설정
+            mime_type = {
+                'jpg': 'image/jpeg',
+                'jpeg': 'image/jpeg',
+                'png': 'image/png',
+                'gif': 'image/gif',
+                'bmp': 'image/bmp',
+                'tiff': 'image/tiff',
+                'tif': 'image/tiff'
+            }.get(extension, f'image/{extension}')
+
+            print(f"이미지 매니페스트 추가: {image_filename} (MIME: {mime_type})")
+            etree.SubElement(manifest, "item",
+                             href=item["image_src"],
+                             id=image_id,
+                             **{"media-type": mime_type})
 
     # OPF 파일 저장
     opf_filepath = os.path.join(output_dir, "book.opf")
