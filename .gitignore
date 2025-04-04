@@ -1,5 +1,6 @@
 # Project specific
 output_dir/
+output_daisy_from_docx/
 input.docx
 sample*.docx
 sample*.odt

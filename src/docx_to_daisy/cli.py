@@ -5,6 +5,25 @@ import argparse
 from docx import Document  # python-docx 라이브러리
 from lxml import etree  # lxml 라이브러리
 from datetime import datetime
+from .markers import MarkerProcessor  # 마커 처리기 임포트
+
+
+def split_text_to_words(text):
+    """텍스트를 단어 단위로 분리합니다."""
+    words = text.split()
+    result = []
+    for word in words:
+        if word.startswith(('(', '[', '{', '<')):
+            result.append(word[0])
+            if len(word) > 1:
+                result.append(word[1:])
+        elif word.endswith((')', ']', '}', '>', '.', ',', ':', ';', '!', '?')):
+            if len(word) > 1:
+                result.append(word[:-1])
+            result.append(word[-1])
+        else:
+            result.append(word)
+    return result
 
 
 def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=None, book_publisher=None, book_language="ko"):
@@ -26,7 +45,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     if book_publisher is None:
         book_publisher = "출판사"
 
-    book_uid = f"AUTO-UID-{uuid.uuid4().int}"  # 고유 식별자
+    book_uid = f"AUTO-UID-{uuid.uuid4().int}-packaged"  # 고유 식별자
 
     # --- 출력 디렉토리 생성 ---
     os.makedirs(output_dir, exist_ok=True)
@@ -43,6 +62,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
 
     content_structure = []
     element_counter = 0
+    sent_counter = 0
 
     # DOCX의 단락(paragraph)을 순회하며 구조 파악
     print("DOCX 파일 분석 중...")
@@ -51,29 +71,104 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
         if not text:  # 내용이 없는 단락은 건너뜀
             continue
 
+        # 마커 처리
+        processed_text, markers = MarkerProcessor.process_text(text)
+
+        # 페이지 마커가 있는 경우 별도의 요소로 추가
+        for marker in markers:
+            if marker.type == "page":
+                element_counter += 1
+                sent_counter += 1
+                elem_id = f"id_{element_counter}"
+                sent_id = f"id_{sent_counter}"
+                content_structure.append({
+                    "type": "pagenum",
+                    "text": marker.value,
+                    "words": [marker.value],
+                    "id": elem_id,
+                    "sent_id": sent_id,
+                    "level": 0,
+                    "markers": [marker],
+                    "smil_file": "mo.smil"
+                })
+
+        if not processed_text.strip():  # 마커만 있고 실제 내용이 없는 경우 건너뜀
+            continue
+
         element_counter += 1
+        sent_counter += 1
         elem_id = f"id_{element_counter}"
+        sent_id = f"id_{sent_counter}"
         style_name = para.style.name.lower()  # 스타일 이름을 소문자로 비교
+
+        # 단어 분리
+        words = split_text_to_words(processed_text)
 
         # 스타일 이름에 따른 구조 매핑
         if style_name.startswith('heading 1') or style_name == '제목 1':
-            content_structure.append(
-                {"type": "h1", "text": text, "id": elem_id, "level": 1})
+            content_structure.append({
+                "type": "h1",
+                "text": processed_text,
+                "words": words,
+                "id": elem_id,
+                "sent_id": sent_id,
+                "level": 1,
+                "markers": markers,
+                "smil_file": "mo.smil"
+            })
         elif style_name.startswith('heading 2') or style_name == '제목 2':
-            content_structure.append(
-                {"type": "h2", "text": text, "id": elem_id, "level": 2})
+            content_structure.append({
+                "type": "h2",
+                "text": processed_text,
+                "words": words,
+                "id": elem_id,
+                "sent_id": sent_id,
+                "level": 2,
+                "markers": markers,
+                "smil_file": "mo.smil"
+            })
         elif style_name.startswith('heading 3') or style_name == '제목 3':
-            content_structure.append(
-                {"type": "h3", "text": text, "id": elem_id, "level": 3})
+            content_structure.append({
+                "type": "h3",
+                "text": processed_text,
+                "words": words,
+                "id": elem_id,
+                "sent_id": sent_id,
+                "level": 3,
+                "markers": markers,
+                "smil_file": "mo.smil"
+            })
         else:  # 기본적으로 'p' (문단)으로 처리
-            content_structure.append(
-                {"type": "p", "text": text, "id": elem_id, "level": 0})
+            content_structure.append({
+                "type": "p",
+                "text": processed_text,
+                "words": words,
+                "id": elem_id,
+                "sent_id": sent_id,
+                "level": 0,
+                "markers": markers,
+                "smil_file": "mo.smil"
+            })
 
     print(f"총 {len(content_structure)}개의 구조 요소 분석 완료.")
 
     # --- 1. DTBook XML 생성 (dtbook.xml) ---
     print("DTBook 생성 중...")
     dtbook_ns = "http://www.daisy.org/z3986/2005/dtbook/"
+    dc_ns = "http://purl.org/dc/elements/1.1/"
+
+    # 페이지 카운터 초기화
+    total_pages = 0
+    max_page_number = 0
+    for item in content_structure:
+        for marker in item.get("markers", []):
+            if marker.type == "page":
+                total_pages += 1
+                try:
+                    page_num = int(marker.value)
+                    max_page_number = max(max_page_number, page_num)
+                except ValueError:
+                    pass
 
     dtbook_root = etree.Element(
         "{%s}dtbook" % dtbook_ns,
@@ -81,47 +176,181 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             "version": "2005-3"
         },
         nsmap={
-            None: dtbook_ns
+            None: dtbook_ns,
+            "dc": dc_ns
         }
     )
 
-    # head 요소 추가 (비어있음)
-    etree.SubElement(dtbook_root, "head")
+    # head 요소 추가
+    head = etree.SubElement(dtbook_root, "head")
+
+    # 필수 메타데이터 추가
+    meta_uid = etree.SubElement(head, "meta",
+                                name="dtb:uid",
+                                content=book_uid)
+    meta_title = etree.SubElement(head, "meta",
+                                  name="dc:Title",
+                                  content=book_title)
+    meta_author = etree.SubElement(head, "meta",
+                                   name="dc:Creator",
+                                   content=book_author)
+    meta_publisher = etree.SubElement(head, "meta",
+                                      name="dc:Publisher",
+                                      content=book_publisher)
+    meta_language = etree.SubElement(head, "meta",
+                                     name="dc:Language",
+                                     content=book_language)
+    meta_date = etree.SubElement(head, "meta",
+                                 name="dc:Date",
+                                 content=datetime.now().strftime("%Y-%m-%d"))
+
+    # 페이지 관련 메타데이터 추가
+    etree.SubElement(head, "meta",
+                     name="dtb:totalPageCount",
+                     content=str(total_pages))
+    etree.SubElement(head, "meta",
+                     name="dtb:maxPageNumber",
+                     content=str(max_page_number))
 
     # book 요소 추가
     dtbook_book = etree.SubElement(dtbook_root, "book")
 
     # frontmatter 추가
     dtbook_frontmatter = etree.SubElement(dtbook_book, "frontmatter")
-    doctitle = etree.SubElement(dtbook_frontmatter, "doctitle", id="forsmil-1")
-    doctitle.text = book_title
+
+    # doctitle과 docauthor 추가 (단어 단위로 분리)
+    doctitle = etree.SubElement(dtbook_frontmatter, "doctitle",
+                                id="forsmil-1",
+                                smilref="mo.smil#sforsmil-1")
+    sent_counter += 1
+    sent = etree.SubElement(doctitle, "sent",
+                            id=f"id_{sent_counter}",
+                            smilref=f"mo.smil#sid_{sent_counter}")
+    for word in split_text_to_words(book_title):
+        w = etree.SubElement(sent, "w")
+        w.text = word
+
+    docauthor = etree.SubElement(dtbook_frontmatter, "docauthor",
+                                 id="forsmil-2",
+                                 smilref="mo.smil#sforsmil-2")
+    sent_counter += 1
+    sent = etree.SubElement(docauthor, "sent",
+                            id=f"id_{sent_counter}",
+                            smilref=f"mo.smil#sid_{sent_counter}")
+    for word in split_text_to_words(book_author):
+        w = etree.SubElement(sent, "w")
+        w.text = word
 
     # bodymatter 추가
     dtbook_bodymatter = etree.SubElement(dtbook_book, "bodymatter")
 
+    # 현재 level1 요소
+    current_level1 = None
+    current_level = 0
+
     # 콘텐츠 추가
     for item in content_structure:
-        elem_id = item["id"]
-        text = item["text"]
+        if item["type"] == "pagenum":
+            pagenum = etree.SubElement(
+                current_level1 if current_level1 is not None else dtbook_bodymatter,
+                "pagenum",
+                id=item["id"],
+                page=str(item["text"])
+            )
+            pagenum.text = str(item["text"])
+            continue
 
         if item["type"].startswith("h"):
-            level = etree.SubElement(
-                dtbook_bodymatter, f"level{item['level']}")
-            heading = etree.SubElement(level, f"h{item['level']}", id=elem_id)
-            heading.text = text
+            level = int(item["type"][1])  # h1 -> 1, h2 -> 2, h3 -> 3
+
+            if level == 1:
+                # 새로운 level1 시작
+                current_level1 = etree.SubElement(dtbook_bodymatter, "level1")
+                current_level = 1
+                heading = etree.SubElement(current_level1, "h1",
+                                           id=item["id"],
+                                           smilref=f"{item['smil_file']}#s{item['id']}")
+                sent = etree.SubElement(heading, "sent",
+                                        id=item["sent_id"],
+                                        smilref=f"{item['smil_file']}#s{item['sent_id']}")
+                for word in item["words"]:
+                    w = etree.SubElement(sent, "w")
+                    w.text = word
+            else:
+                # level2, level3는 이전 level1 내에 위치
+                if current_level1 is None:
+                    # level1이 없는 경우 생성
+                    current_level1 = etree.SubElement(
+                        dtbook_bodymatter, "level1")
+                    current_level = 1
+                    # 임시 제목 추가
+                    temp_h1 = etree.SubElement(current_level1, "h1")
+                    temp_h1.text = "제목 없음"
+
+                parent = current_level1
+                for l in range(2, level + 1):
+                    level_elem = parent.find(f"level{l}")
+                    if level_elem is None:
+                        level_elem = etree.SubElement(parent, f"level{l}")
+                    parent = level_elem
+
+                heading = etree.SubElement(parent, f"h{level}",
+                                           id=item["id"],
+                                           smilref=f"{item['smil_file']}#s{item['id']}")
+                sent = etree.SubElement(heading, "sent",
+                                        id=item["sent_id"],
+                                        smilref=f"{item['smil_file']}#s{item['sent_id']}")
+                for word in item["words"]:
+                    w = etree.SubElement(sent, "w")
+                    w.text = word
+
+            # 기타 마커 처리
+            for marker in item.get("markers", []):
+                if marker.type != "page":  # 페이지 마커는 이미 처리됨
+                    elem_info = MarkerProcessor.create_dtbook_element(marker)
+                    if elem_info:
+                        marker_elem = etree.SubElement(parent, elem_info["tag"],
+                                                       attrib=elem_info["attrs"])
+                        marker_elem.text = elem_info["text"]
         else:
-            p = etree.SubElement(dtbook_bodymatter, "p", id=elem_id)
-            p.text = text
+            # 일반 단락은 현재 level 요소 내에 추가
+            if current_level1 is None:
+                # level1이 없는 경우 생성
+                current_level1 = etree.SubElement(dtbook_bodymatter, "level1")
+                # 임시 제목 추가
+                temp_h1 = etree.SubElement(current_level1, "h1")
+                temp_h1.text = "제목 없음"
+
+            p = etree.SubElement(current_level1, "p",
+                                 id=item["id"],
+                                 smilref=f"{item['smil_file']}#s{item['id']}")
+            sent = etree.SubElement(p, "sent",
+                                    id=item["sent_id"],
+                                    smilref=f"{item['smil_file']}#s{item['sent_id']}")
+            for word in item["words"]:
+                w = etree.SubElement(sent, "w")
+                w.text = word
+
+            # 기타 마커 처리
+            for marker in item.get("markers", []):
+                if marker.type != "page":  # 페이지 마커는 이미 처리됨
+                    elem_info = MarkerProcessor.create_dtbook_element(marker)
+                    if elem_info:
+                        marker_elem = etree.SubElement(current_level1,
+                                                       elem_info["tag"],
+                                                       attrib=elem_info["attrs"])
+                        marker_elem.text = elem_info["text"]
 
     # XML 파일 저장
     dtbook_filepath = os.path.join(output_dir, "dtbook.xml")
     tree = etree.ElementTree(dtbook_root)
 
     with open(dtbook_filepath, 'wb') as f:
-        f.write(b'<?xml version="1.0" encoding="UTF-8"?>\n')
+        f.write(b'<?xml version="1.0" encoding="utf-8"?>\n')
+        f.write(b'<!DOCTYPE dtbook\n  PUBLIC "-//NISO//DTD dtbook 2005-3//EN" "http://www.daisy.org/z3986/2005/dtbook-2005-3.dtd">\n')
         tree.write(f,
                    pretty_print=True,
-                   encoding='UTF-8',
+                   encoding='utf-8',
                    xml_declaration=False)
 
     print(f"DTBook 생성 완료: {dtbook_filepath}")
@@ -202,10 +431,10 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                      id="opf-1",
                      **{"media-type": "application/x-dtbook+xml"})
 
-    # SMIL
+    # SMIL 파일들
     etree.SubElement(manifest, "item",
-                     href="mo0.smil",
-                     id="mo0",
+                     href="mo.smil",
+                     id="mo",
                      **{"media-type": "application/smil"})
 
     # NCX
@@ -223,7 +452,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     # Spine
     spine = etree.SubElement(opf_root, "spine")
     etree.SubElement(spine, "itemref",
-                     idref="mo0")
+                     idref="mo")
 
     # OPF 파일 저장
     opf_filepath = os.path.join(output_dir, "book.opf")
@@ -239,8 +468,9 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
 
     print(f"OPF 생성 완료: {opf_filepath}")
 
-    # --- 3. SMIL 파일 생성 (mo0.smil) ---
-    print("SMIL 생성 중...")
+    # --- 3. SMIL 파일 생성 (mo.smil) ---
+    print("SMIL 파일 생성 중...")
+
     smil_ns = "http://www.w3.org/2001/SMIL20/"
 
     smil_root = etree.Element(
@@ -262,48 +492,74 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                      name="dtb:generator",
                      content="DAISY Pipeline 2")
 
-    # customAttributes
-    custom_attrs = etree.SubElement(head, "customAttributes")
-    custom_tests = [
-        ("pagenum", "page"),
-        ("note", "note"),
-        ("noteref", "note"),
-        ("annotation", "annotation"),
-        ("linenum", "line"),
-        ("sidebar", "sidebar"),
-        ("prodnote", "note")
-    ]
-
-    for test_id, _ in custom_tests:
-        etree.SubElement(custom_attrs, "customTest",
-                         id=test_id,
-                         defaultState="false",
-                         override="visible")
+    # 페이지 관련 메타데이터 추가
+    etree.SubElement(head, "meta",
+                     name="dtb:totalPageCount",
+                     content=str(total_pages))
+    etree.SubElement(head, "meta",
+                     name="dtb:maxPageNumber",
+                     content=str(max_page_number))
 
     # body
     body = etree.SubElement(smil_root, "body")
     root_seq = etree.SubElement(body, "seq", id="root-seq")
 
-    # doctitle
-    doctitle_par = etree.SubElement(root_seq, "par",
+    # doctitle과 docauthor 추가
+    doctitle_seq = etree.SubElement(root_seq, "seq",
                                     id="sforsmil-1",
                                     **{"class": "doctitle"})
+    doctitle_par = etree.SubElement(doctitle_seq, "par",
+                                    id=f"sid_{sent_counter-1}",
+                                    **{"class": "sent"})
     etree.SubElement(doctitle_par, "text",
-                     src="dtbook.xml#forsmil-1")
+                     src=f"dtbook.xml#id_{sent_counter-1}")
 
-    # 콘텐츠
-    for i, item in enumerate(content_structure, start=1):
+    docauthor_seq = etree.SubElement(root_seq, "seq",
+                                     id="sforsmil-2",
+                                     **{"class": "docauthor"})
+    docauthor_par = etree.SubElement(docauthor_seq, "par",
+                                     id=f"sid_{sent_counter}",
+                                     **{"class": "sent"})
+    etree.SubElement(docauthor_par, "text",
+                     src=f"dtbook.xml#id_{sent_counter}")
+
+    # 나머지 콘텐츠 추가
+    for item in content_structure:
+        # 페이지 마커 처리
+        for marker in item.get("markers", []):
+            if marker.type == "page":
+                page_seq = etree.SubElement(root_seq, "seq",
+                                            id=f"spage_{marker.value}",
+                                            **{"class": "pagenum"})
+                page_par = etree.SubElement(page_seq, "par",
+                                            id=f"ppage_{marker.value}")
+                etree.SubElement(page_par, "text",
+                                 src=f"dtbook.xml#page_{marker.value}")
+
         seq = etree.SubElement(root_seq, "seq",
                                id=f"s{item['id']}",
                                **{"class": item["type"]})
+
+        # 기본 콘텐츠
         par = etree.SubElement(seq, "par",
-                               id=f"p{item['id']}",
+                               id=f"s{item['sent_id']}",
                                **{"class": "sent"})
         etree.SubElement(par, "text",
-                         src=f"dtbook.xml#{item['id']}")
+                         src=f"dtbook.xml#{item['sent_id']}")
+
+        # 마커에 대한 SMIL 요소 추가
+        for marker in item.get("markers", []):
+            elem_info = MarkerProcessor.create_smil_element(marker, item["id"])
+            if elem_info:
+                marker_seq = etree.SubElement(seq, "seq",
+                                              **{"class": elem_info["seq_class"]})
+                marker_par = etree.SubElement(marker_seq, "par",
+                                              **{"class": elem_info["par_class"]})
+                etree.SubElement(marker_par, "text",
+                                 src=elem_info["text_src"])
 
     # SMIL 파일 저장
-    smil_filepath = os.path.join(output_dir, "mo0.smil")
+    smil_filepath = os.path.join(output_dir, "mo.smil")
     tree = etree.ElementTree(smil_root)
 
     with open(smil_filepath, 'wb') as f:
@@ -314,9 +570,147 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                    encoding='utf-8',
                    xml_declaration=False)
 
-    print(f"SMIL 생성 완료: {smil_filepath}")
+    print(f"SMIL 파일 생성 완료: {smil_filepath}")
 
-    # --- 4. Resources 파일 생성 (resources.res) ---
+    # --- 4. NCX 파일 생성 (navigation.ncx) ---
+    print("NCX 생성 중...")
+    ncx_ns = "http://www.daisy.org/z3986/2005/ncx/"
+
+    ncx_root = etree.Element(
+        "{%s}ncx" % ncx_ns,
+        attrib={
+            "version": "2005-1"
+        },
+        nsmap={
+            None: ncx_ns
+        }
+    )
+
+    # head
+    head = etree.SubElement(ncx_root, "head")
+    etree.SubElement(head, "meta",
+                     name="dtb:uid",
+                     content=book_uid)
+    etree.SubElement(head, "meta",
+                     name="dtb:depth",
+                     content="3")  # 최대 제목 레벨
+    etree.SubElement(head, "meta",
+                     name="dtb:totalPageCount",
+                     content=str(total_pages))
+    etree.SubElement(head, "meta",
+                     name="dtb:maxPageNumber",
+                     content=str(max_page_number))
+
+    # docTitle
+    doc_title = etree.SubElement(ncx_root, "docTitle")
+    text = etree.SubElement(doc_title, "text")
+    text.text = book_title
+
+    # docAuthor
+    doc_author = etree.SubElement(ncx_root, "docAuthor")
+    text = etree.SubElement(doc_author, "text")
+    text.text = book_author
+
+    # navMap
+    nav_map = etree.SubElement(ncx_root, "navMap")
+
+    # 목차 항목 생성
+    play_order = 1
+    current_level1_point = None
+    current_level2_point = None
+
+    for item in content_structure:
+        if item["type"].startswith("h"):
+            level = int(item["type"][1])  # h1 -> 1, h2 -> 2, h3 -> 3
+            nav_point = etree.Element("navPoint",
+                                      id=f"nav_{item['id']}",
+                                      playOrder=str(play_order))
+            nav_label = etree.SubElement(nav_point, "navLabel")
+            text = etree.SubElement(nav_label, "text")
+            text.text = item["text"]
+            content = etree.SubElement(nav_point, "content",
+                                       src=f"{item['smil_file']}#s{item['id']}")
+
+            if level == 1:
+                nav_map.append(nav_point)
+                current_level1_point = nav_point
+                current_level2_point = None
+            elif level == 2 and current_level1_point is not None:
+                current_level1_point.append(nav_point)
+                current_level2_point = nav_point
+            elif level == 3 and current_level2_point is not None:
+                current_level2_point.append(nav_point)
+
+            play_order += 1
+
+    # pageList (페이지 마커가 있는 경우 추가)
+    page_targets = []
+    for item in content_structure:
+        for marker in item.get("markers", []):
+            if marker.type == "page":
+                page_targets.append({
+                    "id": f"page_{marker.value}",
+                    "value": marker.value,
+                    "type": "normal",  # front, normal, special 중 하나
+                    "smil_file": item["smil_file"],
+                    "item_id": item["id"]
+                })
+
+    if page_targets:
+        page_list = etree.SubElement(ncx_root, "pageList")
+        for page in page_targets:
+            nav_point = etree.SubElement(page_list, "pageTarget",
+                                         id=page["id"],
+                                         value=page["value"],
+                                         type=page["type"])
+            nav_label = etree.SubElement(nav_point, "navLabel")
+            text = etree.SubElement(nav_label, "text")
+            text.text = page["value"]
+            content = etree.SubElement(nav_point, "content",
+                                       src=f"{page['smil_file']}#s{page['item_id']}")
+
+    # navList (각주, 미주 등이 있는 경우 추가)
+    note_targets = []
+    for item in content_structure:
+        for marker in item.get("markers", []):
+            if marker.type in ["note", "annotation"]:
+                note_targets.append({
+                    "id": f"note_{marker.value}",
+                    "text": marker.text,
+                    "smil_file": item["smil_file"],
+                    "item_id": item["id"]
+                })
+
+    if note_targets:
+        nav_list = etree.SubElement(ncx_root, "navList")
+        nav_label = etree.SubElement(nav_list, "navLabel")
+        text = etree.SubElement(nav_label, "text")
+        text.text = "각주"
+
+        for note in note_targets:
+            nav_target = etree.SubElement(nav_list, "navTarget",
+                                          id=note["id"])
+            nav_label = etree.SubElement(nav_target, "navLabel")
+            text = etree.SubElement(nav_label, "text")
+            text.text = note["text"]
+            content = etree.SubElement(nav_target, "content",
+                                       src=f"{note['smil_file']}#s{note['item_id']}")
+
+    # NCX 파일 저장
+    ncx_filepath = os.path.join(output_dir, "navigation.ncx")
+    tree = etree.ElementTree(ncx_root)
+
+    with open(ncx_filepath, 'wb') as f:
+        f.write(b'<?xml version="1.0" encoding="utf-8"?>\n')
+        f.write(b'<!DOCTYPE ncx\n  PUBLIC "-//NISO//DTD ncx 2005-1//EN" "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd">\n')
+        tree.write(f,
+                   pretty_print=True,
+                   encoding='utf-8',
+                   xml_declaration=False)
+
+    print(f"NCX 생성 완료: {ncx_filepath}")
+
+    # --- 5. Resources 파일 생성 (resources.res) ---
     print("Resources 생성 중...")
     res_ns = "http://www.daisy.org/z3986/2005/resource/"
 

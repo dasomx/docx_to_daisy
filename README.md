@@ -8,6 +8,7 @@ Microsoft Word 문서(DOCX)를 DAISY 형식으로 변환하는 파이썬 도구�
 - 문서의 제목과 단락 구조 보존
 - 제목 수준(Heading 1-3) 지원
 - DAISY 표준 준수 (DTBook, NCX, SMIL, OPF, Resources)
+- 특수 마커를 통한 페이지, 각주, 사이드바 등 지원
 - ZIP 압축 지원
 
 ## 설치
@@ -53,6 +54,30 @@ python -m docx_to_daisy input.docx \
 - `--zip`: 출력 파일들을 ZIP으로 압축
 - `--zip-filename`: ZIP 파일 이름 (기본값: output_dir과 동일한 이름에 .zip 확장자)
 
+### 지원하는 마커
+
+DOCX 파일 내에서 다음과 같은 특수 마커를 사용할 수 있습니다:
+
+- `$#숫자`: 페이지 번호 (예: `$#11`)
+- `$note{내용}`: 각주
+- `$sidebar{내용}`: 사이드바
+- `$annotation{내용}`: 주석
+- `$line{숫자}`: 줄 번호
+- `$noteref{참조}`: 각주 참조
+- `$prodnote{내용}`: 제작 노트
+
+예시:
+```
+첫 번째 문단입니다.
+$#1
+두 번째 문단입니다.
+$note{이것은 각주입니다.}
+세 번째 문단입니다.
+$#2
+네 번째 문단입니다.
+$sidebar{이것은 사이드바 내용입니다.}
+```
+
 ## 생성되는 파일
 
 - `dtbook.xml`: DAISY 텍스트 콘텐츠
@@ -68,8 +93,6 @@ python -m docx_to_daisy input.docx \
 - 이미지
 - 표
 - 목록
-- 페이지 번호
-- 각주/미주
 - 수식
 
 ## 지원하는 DOCX 요소
@@ -77,6 +100,7 @@ python -m docx_to_daisy input.docx \
 - 제목 (Heading 1-3)
 - 일반 문단
 - 문서 메타데이터 (제목, 저자, 출판사, 언어)
+- 특수 마커를 통한 페이지, 각주, 사이드바 등
 
 ## 라이선스
 
