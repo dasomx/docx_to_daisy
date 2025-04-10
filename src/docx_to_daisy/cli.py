@@ -71,6 +71,25 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
         book_publisher (str, optional): 출판사. 기본값은 None
         book_language (str, optional): 언어 코드 (ISO 639-1). 기본값은 "ko"
     """
+    # 이미지 설명 처리 함수 정의
+    def get_clean_description(desc_list):
+        """이미지 설명 목록에서 중복을 제거하고 깔끔한 설명을 반환합니다"""
+        if not desc_list:
+            return None
+        
+        # 중복 제거
+        unique_desc = []
+        seen = set()
+        for desc in desc_list:
+            if desc not in seen:
+                seen.add(desc)
+                unique_desc.append(desc)
+        
+        # 설명이 너무 길면 첫 번째 항목만 반환
+        if len(unique_desc) > 0:
+            return unique_desc[0]
+        return None
+    
     # --- 기본 정보 설정 ---
     if book_title is None:
         book_title = os.path.splitext(os.path.basename(docx_file_path))[0]
@@ -98,80 +117,194 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     element_counter = 0
     sent_counter = 0
 
+    # 이미지 처리 개선
+    print("이미지 처리 중...")
     # 이미지 저장 디렉토리 생성
     images_dir = os.path.join(output_dir, "images")
     os.makedirs(images_dir, exist_ok=True)
-
-    # 이미지 처리
-    image_counter = 0
-    print("\n이미지 처리 시작...")
-
-    # 문서의 모든 이미지 관계와 위치 매핑
-    image_locations = {}  # rId -> paragraph index 매핑
+    
+    # 이미지 관련 정보 저장 변수
+    image_info = {}  # 이미지 번호 -> {제목, 설명, 위치} 매핑
+    
+    # 1. 먼저 문서 내 이미지 제목 및 설명 찾기
+    # 이미지 패턴 개선 - [그림 N] 형식과 [그림] 형식 모두 지원
+    image_pattern = re.compile(r'\[그림(?:\s*(\d+))?\]\s*(.*?)$', re.IGNORECASE)
+    image_desc_start_pattern = re.compile(r'\[그림\s*설명\]', re.IGNORECASE)
+    image_desc_end_pattern = re.compile(r'\[그림\s*끝\]', re.IGNORECASE)
+    
+    current_image_num = None
+    collecting_desc = False
+    current_desc = []
+    
     for para_idx, para in enumerate(document.paragraphs):
-        for run in para.runs:
-            if hasattr(run, '_element') and run._element.find('.//a:blip', {'a': 'http://schemas.openxmlformats.org/drawingml/2006/main'}) is not None:
-                blip = run._element.find(
-                    './/a:blip', {'a': 'http://schemas.openxmlformats.org/drawingml/2006/main'})
-                rId = blip.get(
-                    '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
-                if rId:
-                    image_locations[rId] = para_idx
-
-    # 문서의 모든 이미지 관계 처리
-    print("\n1. 문서의 이미지 관계 확인 중...")
-    for rel in document.part.rels.values():
-        print(f"  관계 타입: {rel.reltype}")
+        # 이미지 제목 패턴 찾기 ([그림 N] 제목 또는 [그림] 제목)
+        match = image_pattern.search(para.text)
+        if match:
+            img_num = match.group(1)  # 이미지 번호 (없을 수 있음)
+            # 제목 추출 - [그림 N] 또는 [그림] 이후의 모든 텍스트
+            title_parts = para.text.split(']', 1)
+            img_title = title_parts[1].strip() if len(title_parts) > 1 else para.text.strip()
+            
+            # 이미지 번호가 없는 경우 자동으로 번호 할당
+            if not img_num:
+                # 현재까지 발견된 이미지 수 + 1을 번호로 사용
+                img_num = str(len(image_info) + 1)
+                print(f"이미지 번호가 없어 자동으로 번호 할당: {img_num}")
+            
+            image_info[img_num] = {
+                'title': img_title,
+                'position': para_idx,
+                'description': [],
+                'alt_text': f"그림 {img_num}: {img_title}"
+            }
+            current_image_num = img_num
+            print(f"이미지 제목 발견: [그림 {img_num}] {img_title} (위치: {para_idx})")
+        
+        # 이미지 설명 시작 패턴 찾기
+        elif image_desc_start_pattern.search(para.text):
+            collecting_desc = True
+            current_desc = []
+            print("이미지 설명 시작")
+        
+        # 이미지 설명 끝 패턴 찾기
+        elif image_desc_end_pattern.search(para.text):
+            collecting_desc = False
+            if current_image_num and current_image_num in image_info:
+                # 동일한 설명이 중복 등록되지 않도록 처리
+                if current_desc:
+                    image_info[current_image_num]['description'] = current_desc
+            current_desc = []
+            print("이미지 설명 끝")
+        
+        # 설명 수집 중이라면 추가 (빈 문단은 제외)
+        elif collecting_desc and para.text.strip():
+            current_desc.append(para.text.strip())
+    
+    # 2. 문서에서 모든 이미지 추출
+    print(f"문서에서 이미지 추출 중...")
+    image_counter = 0
+    image_relations = []
+    
+    # 모든 이미지 관계 수집
+    for rel_id, rel in document.part.rels.items():
         if "image" in rel.reltype:
             try:
-                image_counter += 1
-                element_counter += 1
-                sent_counter += 1
-                elem_id = f"id_{element_counter}"
-                sent_id = f"id_{sent_counter}"
-
-                # 이미지 파일 저장
-                image_filename = f"image_{image_counter}{os.path.splitext(rel.target_part.partname)[1]}"
-                image_path = os.path.join(images_dir, image_filename)
-
-                print(f"  이미지 {image_counter} 발견:")
-                print(f"    - 파일명: {image_filename}")
-                print(f"    - 저장 경로: {image_path}")
-                print(f"    - 관계 ID: {rel.rId}")
-
-                with open(image_path, "wb") as f:
-                    f.write(rel.target_part.blob)
-
-                # 이미지 설명 찾기
-                alt_text = f"이미지 {image_counter}"
-
-                # 이미지의 위치 찾기
-                para_idx = image_locations.get(
-                    rel.rId, len(document.paragraphs))
-
-                content_structure.append({
-                    "type": "imggroup",
-                    "image_src": f"images/{image_filename}",
-                    "alt_text": alt_text,
-                    "id": elem_id,
-                    "sent_id": sent_id,
-                    "level": 0,
-                    "markers": [],
-                    "smil_file": "mo.smil",
-                    "position": para_idx,
-                    "insert_before": True  # 단락 앞에 이미지 삽입
-                })
-
-                print(f"    - 이미지 위치: 단락 {para_idx}")
-                print(f"    - 이미지 추출 완료")
+                # 이미지 관계 정보 저장
+                image_relations.append(rel)
+                print(f"이미지 관계 발견: {rel_id}, {rel.reltype}")
             except Exception as e:
-                print(f"    - 오류 발생: {str(e)}")
-
-    print(f"\n총 {image_counter}개의 이미지 처리 완료")
-    print("이미지 처리 종료\n")
+                print(f"이미지 관계 처리 오류: {str(e)}")
+    
+    print(f"문서에서 {len(image_relations)}개의 이미지 관계 발견")
+    
+    # 이미지 매핑 정보 초기화
+    image_mapping = {}  # 이미지 번호 -> 이미지 관계 매핑
+    
+    # 이미지 제목과 이미지 관계 매핑 시도
+    # 1. 먼저 이미지 제목이 있는 이미지 매핑
+    for img_num, info in image_info.items():
+        if int(img_num) <= len(image_relations):
+            image_mapping[img_num] = image_relations[int(img_num) - 1]
+            print(f"이미지 {img_num} 매핑: {info['title']}")
+    
+    # 2. 매핑되지 않은 이미지 관계에 대해 자동 번호 할당
+    for i, rel in enumerate(image_relations):
+        img_num = str(i + 1)
+        if img_num not in image_mapping:
+            image_mapping[img_num] = rel
+            # 이미지 정보가 없는 경우 기본 정보 생성
+            if img_num not in image_info:
+                image_info[img_num] = {
+                    'title': f"이미지 {img_num}",
+                    'position': len(document.paragraphs),  # 기본값으로 문서 끝에 배치
+                    'description': [],
+                    'alt_text': f"이미지 {img_num}"
+                }
+                print(f"이미지 {img_num}에 대한 정보가 없어 기본 정보 생성")
+    
+    # 각 이미지 처리
+    for img_num, rel in image_mapping.items():
+        try:
+            image_counter += 1
+            element_counter += 1
+            sent_counter += 1
+            
+            # 이미지 ID 생성
+            elem_id = f"id_{element_counter}"
+            sent_id = f"id_{sent_counter}"
+            
+            # 이미지 파일 저장 - 원본 확장자 유지
+            image_ext = os.path.splitext(rel.target_ref)[1]
+            if not image_ext:  # 확장자가 없으면 기본값 사용
+                image_ext = ".jpeg"
+            
+            image_filename = f"image_{img_num}{image_ext}"
+            image_path = os.path.join(images_dir, image_filename)
+            
+            # 이미지 데이터 추출 및 저장
+            image_data = rel.target_part.blob
+            with open(image_path, "wb") as img_file:
+                img_file.write(image_data)
+            print(f"이미지 {img_num} 저장: {image_path}")
+            
+            # 이미지 관련 정보 찾기
+            alt_text = f"이미지 {img_num}"
+            img_position = len(document.paragraphs)  # 기본값으로 문서 끝에 배치
+            img_description = []
+            img_title = ""
+            
+            # 문서에서 추출한 이미지 정보가 있으면 사용
+            if img_num in image_info:
+                img_title = image_info[img_num]['title']
+                alt_text = f"그림 {img_num}: {img_title}"
+                img_position = image_info[img_num]['position'] + 1  # 이미지 제목 다음에 배치
+                img_description = image_info[img_num]['description']
+            
+            # 설명 정리
+            clean_desc = get_clean_description(img_description) if img_description else None
+            
+            # 이미지 정보를 content_structure에 추가
+            content_structure.append({
+                "type": "image",
+                "src": f"images/{image_filename}",
+                "alt_text": alt_text,
+                "title": img_title,
+                "id": elem_id,
+                "sent_id": sent_id,
+                "level": 0,
+                "markers": [],
+                "smil_file": "mo.smil",
+                "position": img_position,
+                "insert_before": False,
+                "description": clean_desc
+            })
+            print(f"이미지 {img_num}를 content_structure에 추가함 (위치: {img_position})")
+        except Exception as e:
+            print(f"이미지 {img_num} 처리 중 오류 발생: {str(e)}")
+    
+    print(f"{image_counter}개 이미지 추출 완료.")
 
     # DOCX의 단락(paragraph)을 순회하며 구조 파악
     print("DOCX 파일 분석 중...")
+    
+    # 표 위치 추적을 위한 변수
+    table_positions = {}  # 표 인덱스 -> 단락 인덱스 매핑
+    
+    # 표 관련 패턴 정의 - 더 엄격한 패턴 사용
+    table_pattern = re.compile(r'\[표(?:\s*\d+)?\]\s*(.*?)$', re.IGNORECASE)
+    
+    # 표 관련 문단들 수집 - 정확한 패턴 매칭 사용
+    table_titles = []  # 각 표 제목 정보 (인덱스, 텍스트)
+    for para_idx, para in enumerate(document.paragraphs):
+        match = table_pattern.search(para.text)
+        if match:  # '[표]' 패턴이 명확하게 있는 경우만 표 제목으로 인식
+            title_text = para.text.strip()
+            table_titles.append((para_idx, title_text))
+            print(f"표 제목 발견: '{title_text}' - 위치: {para_idx}")
+    
+    print(f"{len(table_titles)}개의 표 제목 발견")
+    
+    # 단락 처리
     for para_idx, para in enumerate(document.paragraphs):
         text = para.text.strip()
 
@@ -229,10 +362,97 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             "position": para_idx,
             "insert_before": False  # 일반 텍스트는 순서대로 삽입
         })
+    
+    # 표 처리 추가
+    print("표 처리 중...")
+    
+    # 문서의 실제 표만 처리
+    if len(document.tables) > 0:
+        print(f"문서에 {len(document.tables)}개의 표와 {len(table_titles)}개의 표 제목 발견")
+        
+        # 각 표와 표 제목 매핑
+        for table_idx, table in enumerate(document.tables, 1):
+            element_counter += 1
+            sent_counter += 1
+            elem_id = f"id_{element_counter}"
+            sent_id = f"id_{sent_counter}"
+            
+            # 표 데이터 추출
+            table_data = {
+                "rows": [],
+                "cols": [],
+                "cells": []
+            }
+            
+            # 행과 열 정보 추출
+            for row_idx, row in enumerate(table.rows):
+                row_data = []
+                for col_idx, cell in enumerate(row.cells):
+                    # 셀 텍스트 추출
+                    cell_text = " ".join(para.text for para in cell.paragraphs)
+                    row_data.append(cell_text)
+                    
+                    # 셀 병합 정보 확인
+                    is_merged = False
+                    if hasattr(cell, '_tc') and hasattr(cell._tc, 'vMerge'):
+                        if cell._tc.vMerge == 'restart':
+                            is_merged = True
+                            print(f"    병합 시작 셀: ({row_idx}, {col_idx})")
+                        elif cell._tc.vMerge == 'continue':
+                            is_merged = True
+                            print(f"    병합 연속 셀: ({row_idx}, {col_idx})")
+                    
+                    # 셀 정보 저장
+                    table_data["cells"].append({
+                        "row": row_idx,
+                        "col": col_idx,
+                        "text": cell_text,
+                        "is_merged": is_merged
+                    })
+                
+                table_data["rows"].append(row_data)
+            
+            # 열 정보 추출
+            for col_idx in range(len(table.columns)):
+                col_data = []
+                for row in table.rows:
+                    if col_idx < len(row.cells):
+                        cell_text = " ".join(para.text for para in row.cells[col_idx].paragraphs)
+                        col_data.append(cell_text)
+                table_data["cols"].append(col_data)
+            
+            # 표 위치와 제목 결정
+            table_position = len(document.paragraphs)  # 기본값으로 문서 끝에 배치
+            table_title = f"표 {table_idx}"
+            
+            # 표 제목이 충분히 있는 경우 매핑
+            if table_idx <= len(table_titles):
+                para_idx, title_text = table_titles[table_idx - 1]
+                table_position = para_idx + 1  # 표 제목 바로 다음에 배치
+                table_title = title_text
+                print(f"표 {table_idx}에 '{table_title}' 제목 매핑됨")
+            
+            # 표 정보를 content_structure에 추가
+            content_structure.append({
+                "type": "table",
+                "table_data": table_data,
+                "id": elem_id,
+                "sent_id": sent_id,
+                "level": 0,
+                "markers": [],
+                "smil_file": "mo.smil",
+                "position": table_position,  # 표의 실제 위치 사용
+                "insert_before": False,
+                "title": table_title,
+                "table_number": table_idx  # 표 번호 저장
+            })
+            
+            print(f"표 {table_idx} 처리 완료: {len(table_data['rows'])}행 x {len(table_data['cols'])}열, 위치: {table_position}")
+    else:
+        print("문서에 표가 없습니다.")
 
     # 콘텐츠를 위치에 따라 정렬
-    content_structure.sort(key=lambda x: (
-        x["position"], not x["insert_before"]))
+    content_structure.sort(key=lambda x: (x["position"], not x["insert_before"]))
 
     print(f"총 {len(content_structure)}개의 구조 요소 분석 완료.")
 
@@ -343,8 +563,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             )
             pagenum.text = str(item["text"])
             continue
-        elif item["type"] == "imggroup":
-            # 이미지는 현재 문서 구조의 적절한 레벨에 추가
+        elif item["type"] == "image":
             if current_level1 is None:
                 # level1이 없는 경우 생성
                 current_level1 = etree.SubElement(dtbook_bodymatter, "level1")
@@ -353,36 +572,154 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                 temp_h1 = etree.SubElement(current_level1, "h1")
                 temp_h1.text = "제목 없음"
 
-            # 현재 레벨에 따라 적절한 부모 요소 찾기
-            if current_level == 0 or current_level == 1:
-                parent = current_level1
-            else:
-                # level2, level3의 경우 현재 레벨에 맞는 부모 찾기
-                parent = current_level1
-                for l in range(2, current_level + 1):
-                    level_elem = parent.find(f"level{l}")
-                    if level_elem is not None:
-                        parent = level_elem
-
+            # 이미지 그룹 생성
             imggroup = etree.SubElement(
-                parent,
+                current_level1,
                 "imggroup",
-                id=item["id"]
+                id=item["id"],
+                class_="figure"
             )
-            img = etree.SubElement(imggroup, "img",
-                                   id=f"{item['id']}_img",
-                                   src=item["image_src"],
-                                   alt=item["alt_text"])
+
+            # 이미지 요소 생성
+            img = etree.SubElement(
+                imggroup,
+                "img",
+                id=f"{item['id']}_img",
+                src=item["src"],
+                alt=item["alt_text"]
+            )
+            
+            # 이미지 크기를 적절히 설정 (실제 이미지 크기를 알 수 없으므로 반응형으로 설정)
+            img.set("width", "100%")
+            img.set("height", "auto")
+            
+            # 이미지 캡션 추가
             caption = etree.SubElement(imggroup, "caption",
                                        id=f"{item['id']}_caption")
             sent = etree.SubElement(caption, "sent",
                                     id=item["sent_id"],
                                     smilref=f"{item['smil_file']}#s{item['sent_id']}")
+            
+            # 이미지 제목만 캡션으로 설정
             w = etree.SubElement(sent, "w")
-            w.text = item["alt_text"]
+            
+            # 제목 설정 (title 키가 있는지 확인하고 사용)
+            if "title" in item and item["title"]:
+                w.text = f"그림 {item['id'].replace('id_', '')}: {item['title']}"
+            else:
+                # alt_text 그대로 사용
+                w.text = item["alt_text"]
+            
+            # 이미지 설명이 있을 경우에만 추가적인 설명 제공
+            if "description" in item and item["description"]:
+                # 설명을 간결하게 요약해서 하나의 문단으로 추가
+                desc_p = etree.SubElement(caption, "p", class_="image-description")
+                desc_p.text = item["description"]
+            
             continue
-
-        if item["type"].startswith("h"):
+        elif item["type"] == "table":
+            # 표 처리
+            if current_level1 is None:
+                # level1이 없는 경우 생성
+                current_level1 = etree.SubElement(dtbook_bodymatter, "level1")
+                current_level = 1
+                # 임시 제목 추가
+                temp_h1 = etree.SubElement(current_level1, "h1")
+                temp_h1.text = "제목 없음"
+            
+            # 표 요소 생성
+            table = etree.SubElement(current_level1, "table", 
+                                    id=item["id"],
+                                    class_="data-table",
+                                    smilref=f"{item['smil_file']}#s{item['id']}",
+                                    border="1")
+            
+            # 표 데이터 가져오기
+            table_data = item["table_data"]
+            
+            # 표 제목 찾기 (아이템에 저장된 제목 또는 문단 내용에서 추출)
+            table_title_text = None
+            
+            # 저장된 제목 확인
+            if "title" in item and item["title"]:
+                title_match = re.search(r'\[표(?:\s*\d+)?\]\s*(.*?)$', item["title"])
+                if title_match and title_match.group(1):
+                    table_title_text = title_match.group(1).strip()
+                else:
+                    # 다른 형식의 제목일 경우
+                    table_title_text = item["title"].strip()
+            
+            # 표 번호 가져오기
+            table_number = item.get("table_number", table_idx)
+            
+            # tbody 요소 생성
+            tbody = etree.SubElement(table, "tbody")
+            
+            # 표 데이터로 행과 열 생성 (모든 행을 tbody에 추가)
+            for row_idx, row_data in enumerate(table_data["rows"]):
+                tr = etree.SubElement(tbody, "tr", 
+                                     id=f"forsmil-{element_counter+row_idx}",
+                                     smilref=f"{item['smil_file']}#sforsmil-{element_counter+row_idx}")
+                
+                for col_idx, cell_text in enumerate(row_data):
+                    # 셀 정보 찾기
+                    cell_info = next((cell for cell in table_data["cells"] 
+                                    if cell["row"] == row_idx and cell["col"] == col_idx), None)
+                    
+                    # 셀 요소 생성 (첫 번째 열은 th로 처리하여 의미론적 구조 강화)
+                    if col_idx == 0:
+                        cell_elem = etree.SubElement(tr, "th", scope="row",
+                                                    id=f"forsmil-{element_counter+row_idx*10+col_idx}",
+                                                    smilref=f"{item['smil_file']}#sforsmil-{element_counter+row_idx*10+col_idx}")
+                    else:
+                        cell_elem = etree.SubElement(tr, "td",
+                                                    id=f"forsmil-{element_counter+row_idx*10+col_idx}",
+                                                    smilref=f"{item['smil_file']}#sforsmil-{element_counter+row_idx*10+col_idx}")
+                    
+                    # 셀 내용 추가
+                    p = etree.SubElement(cell_elem, "p",
+                                        id=f"forsmil-{element_counter+row_idx*10+col_idx+1}",
+                                        smilref=f"{item['smil_file']}#sforsmil-{element_counter+row_idx*10+col_idx+1}")
+                    
+                    # 단어 분리 및 추가
+                    words = split_text_to_words(cell_text)
+                    sent = etree.SubElement(p, "sent",
+                                           id=f"id_{sent_counter}",
+                                           smilref=f"{item['smil_file']}#sid_{sent_counter}")
+                    sent_counter += 1
+                    
+                    for word in words:
+                        w = etree.SubElement(sent, "w")
+                        w.text = word
+                    
+                    # 병합된 셀 처리 - 실제 병합 정보가 있을 경우에만 적용
+                    if cell_info and cell_info["is_merged"]:
+                        try:
+                            # 병합 방향 및 크기 결정 (세로 병합 또는 가로 병합)
+                            is_row_merged = False
+                            is_col_merged = False
+                            
+                            # 현재 셀이 병합 시작 셀인지 확인 - 안전하게 처리
+                            current_cell = None
+                            try:
+                                if row_idx < len(table.rows) and col_idx < len(table.rows[row_idx].cells):
+                                    current_cell = table.rows[row_idx].cells[col_idx]
+                            except:
+                                pass
+                            
+                            if current_cell:
+                                if hasattr(current_cell, '_tc') and hasattr(current_cell._tc, 'vMerge'):
+                                    if current_cell._tc.vMerge == 'restart':
+                                        is_row_merged = True
+                                        cell_elem.set("rowspan", "2")  # 기본값으로 2행 병합
+                                
+                                if hasattr(current_cell, '_tc') and hasattr(current_cell._tc, 'hMerge'):
+                                    if current_cell._tc.hMerge == 'restart':
+                                        is_col_merged = True
+                                        cell_elem.set("colspan", "2")  # 기본값으로 2열 병합
+                        except Exception as e:
+                            print(f"병합 셀 처리 중 오류 발생: {str(e)}")
+        elif item["type"].startswith("h"):
             level = int(item["type"][1])  # h1 -> 1, h2 -> 2, h3 -> 3
 
             if level == 1:
@@ -578,8 +915,8 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
 
     # OPF Manifest에 이미지 파일 추가
     for item in content_structure:
-        if item["type"] == "imggroup":
-            image_filename = os.path.basename(item["image_src"])
+        if item["type"] == "image":
+            image_filename = os.path.basename(item["src"])
             image_id = f"img_{item['id']}"
             extension = os.path.splitext(image_filename)[1][1:].lower()
 
@@ -596,7 +933,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
 
             print(f"이미지 매니페스트 추가: {image_filename} (MIME: {mime_type})")
             etree.SubElement(manifest, "item",
-                             href=item["image_src"],
+                             href=item["src"],
                              id=image_id,
                              **{"media-type": mime_type})
 
@@ -693,6 +1030,29 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
         etree.SubElement(par, "text",
                          src=f"dtbook.xml#{item['sent_id']}")
 
+        # 표에 대한 SMIL 요소 추가
+        if item["type"] == "table":
+            # 표 시퀀스 추가
+            table_seq = etree.SubElement(seq, "seq",
+                                        id=f"stable_{item['id']}",
+                                        **{"class": "table"})
+            
+            # 표 행 시퀀스 추가
+            for row_idx, row_data in enumerate(item["table_data"]["rows"]):
+                row_seq = etree.SubElement(table_seq, "seq",
+                                          id=f"stable_{item['id']}_row_{row_idx}",
+                                          **{"class": "table-row"})
+                
+                # 표 셀 시퀀스 추가
+                for col_idx, cell_text in enumerate(row_data):
+                    cell_seq = etree.SubElement(row_seq, "seq",
+                                               id=f"stable_{item['id']}_cell_{row_idx}_{col_idx}",
+                                               **{"class": "table-cell"})
+                    cell_par = etree.SubElement(cell_seq, "par",
+                                               id=f"stable_{item['id']}_cell_{row_idx}_{col_idx}_par")
+                    etree.SubElement(cell_par, "text",
+                                    src=f"dtbook.xml#table_{item['id']}_cell_{row_idx}_{col_idx}")
+
         # 마커에 대한 SMIL 요소 추가
         for marker in item.get("markers", []):
             elem_info = MarkerProcessor.create_smil_element(marker, item["id"])
@@ -787,6 +1147,24 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             elif level == 3 and current_level2_point is not None:
                 current_level2_point.append(nav_point)
 
+            play_order += 1
+        elif item["type"] == "table":
+            # 표 네비게이션 포인트 추가
+            nav_point = etree.Element("navPoint",
+                                      id=f"nav_{item['id']}",
+                                      playOrder=str(play_order))
+            nav_label = etree.SubElement(nav_point, "navLabel")
+            text = etree.SubElement(nav_label, "text")
+            text.text = f"표 {play_order}"  # 표 제목 또는 번호
+            content = etree.SubElement(nav_point, "content",
+                                       src=f"{item['smil_file']}#s{item['id']}")
+            
+            # 현재 레벨에 추가
+            if current_level1_point is not None:
+                current_level1_point.append(nav_point)
+            else:
+                nav_map.append(nav_point)
+            
             play_order += 1
 
     # pageList (페이지 마커가 있는 경우 추가)
