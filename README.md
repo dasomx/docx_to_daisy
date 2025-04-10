@@ -21,19 +21,19 @@ source venv/bin/activate  # Linux/Mac
 venv\Scripts\activate  # Windows
 
 # 필요한 패키지 설치
-pip install -r requirements.txt
+pip install -e .
 ```
 
 ## 사용법
 
 기본 사용:
 ```bash
-python -m docx_to_daisy input.docx
+docx-to-daisy input.docx --zip
 ```
 
 모든 옵션 사용:
 ```bash
-python -m docx_to_daisy input.docx \
+docx-to-daisy input.docx \
     --output-dir my_daisy_book \
     --title "책 제목" \
     --author "저자 이름" \
