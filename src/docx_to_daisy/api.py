@@ -3,11 +3,12 @@ import tempfile
 import uuid
 import logging
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Form
-from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import shutil
 from pathlib import Path
 from typing import Optional
+import urllib.parse
 
 from .cli import create_daisy_book, zip_daisy_output
 
@@ -96,12 +97,19 @@ async def convert_docx_to_daisy(
         background_tasks.add_task(cleanup_temp_files, temp_docx_path, output_dir, zip_file_path)
         logger.info("임시 파일 정리 작업 등록됨")
         
-        # ZIP 파일 반환
-        logger.info(f"ZIP 파일 반환: {zip_file_path}")
-        return FileResponse(
-            path=str(zip_file_path),
-            filename=f"{Path(file.filename).stem}_daisy.zip",
-            media_type="application/zip"
+        # 파일명을 URL 인코딩하여 한글 처리
+        encoded_filename = urllib.parse.quote(f"{Path(file.filename).stem}_daisy.zip")
+        
+        def iterfile():
+            with open(zip_file_path, mode="rb") as file_like:
+                yield from file_like
+                
+        return StreamingResponse(
+            iterfile(),
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"
+            }
         )
     
     except Exception as e:
