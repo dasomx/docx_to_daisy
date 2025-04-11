@@ -126,18 +126,17 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     # 이미지 관련 정보 저장 변수
     image_info = {}  # 이미지 번호 -> {제목, 설명, 위치} 매핑
     
-    # 1. 먼저 문서 내 이미지 제목 및 설명 찾기
-    # 이미지 패턴 개선 - [그림 N] 형식과 [그림] 형식 모두 지원
-    image_pattern = re.compile(r'\[그림(?:\s*(\d+))?\]\s*(.*?)$', re.IGNORECASE)
-    image_desc_start_pattern = re.compile(r'\[그림\s*설명\]', re.IGNORECASE)
-    image_desc_end_pattern = re.compile(r'\[그림\s*끝\]', re.IGNORECASE)
+    # 이미지 패턴 개선 - [그림 N], [그림], [사진 N], [사진] 형식 모두 지원
+    image_pattern = re.compile(r'\[(?:그림|사진)(?:\s*(\d+))?\]\s*(.*?)$', re.IGNORECASE)
+    image_desc_start_pattern = re.compile(r'\[(?:그림|사진)\s*설명\]', re.IGNORECASE)
+    image_desc_end_pattern = re.compile(r'\[(?:그림|사진)\s*끝\]', re.IGNORECASE)
     
     current_image_num = None
     collecting_desc = False
     current_desc = []
     
     for para_idx, para in enumerate(document.paragraphs):
-        # 이미지 제목 패턴 찾기 ([그림 N] 제목 또는 [그림] 제목)
+        # 이미지 제목 패턴 찾기
         match = image_pattern.search(para.text)
         if match:
             img_num = match.group(1)  # 이미지 번호 (없을 수 있음)
@@ -145,9 +144,11 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             title_parts = para.text.split(']', 1)
             img_title = title_parts[1].strip() if len(title_parts) > 1 else para.text.strip()
             
+            # 이미지 타입 확인 (그림 또는 사진)
+            img_type = "그림" if "[그림" in para.text else "사진"
+            
             # 이미지 번호가 없는 경우 자동으로 번호 할당
             if not img_num:
-                # 현재까지 발견된 이미지 수 + 1을 번호로 사용
                 img_num = str(len(image_info) + 1)
                 print(f"이미지 번호가 없어 자동으로 번호 할당: {img_num}")
             
@@ -155,10 +156,11 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                 'title': img_title,
                 'position': para_idx,
                 'description': [],
-                'alt_text': f"그림 {img_num}: {img_title}"
+                'alt_text': f"{img_type} {img_num}: {img_title}",
+                'type': img_type  # 이미지 타입 저장
             }
             current_image_num = img_num
-            print(f"이미지 제목 발견: [그림 {img_num}] {img_title} (위치: {para_idx})")
+            print(f"이미지 제목 발견: [{img_type} {img_num}] {img_title} (위치: {para_idx})")
         
         # 이미지 설명 시작 패턴 찾기
         elif image_desc_start_pattern.search(para.text):
@@ -199,14 +201,14 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     
     # 이미지 매핑 정보 초기화
     image_mapping = {}  # 이미지 번호 -> 이미지 관계 매핑
-    
+
     # 이미지 제목과 이미지 관계 매핑 시도
     # 1. 먼저 이미지 제목이 있는 이미지 매핑
     for img_num, info in image_info.items():
         if int(img_num) <= len(image_relations):
             image_mapping[img_num] = image_relations[int(img_num) - 1]
             print(f"이미지 {img_num} 매핑: {info['title']}")
-    
+
     # 2. 매핑되지 않은 이미지 관계에 대해 자동 번호 할당
     for i, rel in enumerate(image_relations):
         img_num = str(i + 1)
@@ -221,9 +223,14 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                     'alt_text': f"이미지 {img_num}"
                 }
                 print(f"이미지 {img_num}에 대한 정보가 없어 기본 정보 생성")
-    
-    # 각 이미지 처리
-    for img_num, rel in image_mapping.items():
+
+    # 3. 이미지 순서 정렬
+    # 이미지 번호를 기준으로 정렬된 이미지 목록 생성
+    sorted_image_nums = sorted(image_mapping.keys(), key=lambda x: int(x) if x.isdigit() else float('inf'))
+
+    # 정렬된 이미지 목록을 사용하여 content_structure에 추가
+    for img_num in sorted_image_nums:
+        rel = image_mapping[img_num]
         try:
             image_counter += 1
             element_counter += 1
@@ -276,7 +283,8 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                 "smil_file": "mo.smil",
                 "position": img_position,
                 "insert_before": False,
-                "description": clean_desc
+                "description": clean_desc,
+                "image_number": int(img_num)  # 이미지 번호를 정수로 저장
             })
             print(f"이미지 {img_num}를 content_structure에 추가함 (위치: {img_position})")
         except Exception as e:
@@ -452,7 +460,9 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
         print("문서에 표가 없습니다.")
 
     # 콘텐츠를 위치에 따라 정렬
-    content_structure.sort(key=lambda x: (x["position"], not x["insert_before"]))
+    content_structure.sort(key=lambda x: (x["position"], 
+                                         x.get("image_number", float('inf')) if x["type"] == "image" else 0, 
+                                         not x["insert_before"]))
 
     print(f"총 {len(content_structure)}개의 구조 요소 분석 완료.")
 
@@ -605,7 +615,9 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             
             # 제목 설정 (title 키가 있는지 확인하고 사용)
             if "title" in item and item["title"]:
-                w.text = f"그림 {item['id'].replace('id_', '')}: {item['title']}"
+                # 이미지 타입에 따라 다른 접두사 사용
+                img_type = item.get("type", "그림")  # 기본값은 "그림"
+                w.text = f"{img_type} {item['id'].replace('id_', '')}: {item['title']}"
             else:
                 # alt_text 그대로 사용
                 w.text = item["alt_text"]
@@ -1339,59 +1351,3 @@ def zip_daisy_output(source_dir, output_zip_filename):
         print(f"ZIP 파일 생성 완료: {output_zip_filename}")
     except Exception as e:
         print(f"ZIP 파일 생성 중 오류 발생: {e}")
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description='DOCX 파일을 DAISY 형식으로 변환합니다.')
-
-    parser.add_argument('input_file',
-                        help='변환할 DOCX 파일 경로')
-
-    parser.add_argument('-o', '--output-dir',
-                        default='output_daisy_from_docx',
-                        help='생성된 DAISY 파일을 저장할 폴더 (기본값: output_daisy_from_docx)')
-
-    parser.add_argument('--title',
-                        help='책 제목 (기본값: DOCX 파일명)')
-
-    parser.add_argument('--author',
-                        help='저자 (기본값: "작성자")')
-
-    parser.add_argument('--publisher',
-                        help='출판사 (기본값: "출판사")')
-
-    parser.add_argument('--language',
-                        default='ko',
-                        help='언어 코드 (ISO 639-1) (기본값: ko)')
-
-    parser.add_argument('--zip',
-                        action='store_true',
-                        help='DAISY 파일들을 ZIP 파일로 압축합니다')
-
-    parser.add_argument('--zip-filename',
-                        help='ZIP 파일 이름 (기본값: output_dir과 동일한 이름에 .zip 확장자)')
-
-    args = parser.parse_args()
-
-    # DAISY 파일 생성
-    create_daisy_book(
-        docx_file_path=args.input_file,
-        output_dir=args.output_dir,
-        book_title=args.title,
-        book_author=args.author,
-        book_publisher=args.publisher,
-        book_language=args.language
-    )
-
-    # ZIP 파일 생성 (--zip 옵션이 지정된 경우)
-    if args.zip:
-        zip_filename = args.zip_filename
-        if zip_filename is None:
-            # 기본 ZIP 파일 이름: 출력 디렉토리 이름.zip
-            zip_filename = f"{args.output_dir}.zip"
-        zip_daisy_output(args.output_dir, zip_filename)
-
-
-if __name__ == '__main__':
-    main()

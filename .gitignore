@@ -43,3 +43,8 @@ ENV/
 # OS
 .DS_Store
 Thumbs.db 
+
+test_*
+~$*
+output*
+TestDoc

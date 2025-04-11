@@ -10,6 +10,7 @@ Microsoft Word 문서(DOCX)를 DAISY 형식으로 변환하는 파이썬 도구�
 - DAISY 표준 준수 (DTBook, NCX, SMIL, OPF, Resources)
 - 특수 마커를 통한 페이지, 각주, 사이드바 등 지원
 - ZIP 압축 지원
+- REST API 지원
 
 ## 설치
 
@@ -26,33 +27,60 @@ pip install -e .
 
 ## 사용법
 
-기본 사용:
+### API 사용법
+
+API 서버 실행:
 ```bash
-docx-to-daisy input.docx --zip
+docx-to-daisy-api
 ```
 
-모든 옵션 사용:
-```bash
-docx-to-daisy input.docx \
-    --output-dir my_daisy_book \
-    --title "책 제목" \
-    --author "저자 이름" \
-    --publisher "출판사 이름" \
-    --language ko \
-    --zip \
-    --zip-filename my_book.zip
+API 엔드포인트:
+- `GET /`: API 루트 경로
+- `POST /convert`: DOCX 파일을 DAISY 형식으로 변환
+
+API 사용 예시 (Python):
+```python
+import requests
+
+url = "http://localhost:8000/convert/"
+files = {"file": open("input.docx", "rb")}
+params = {
+    "title": "책 제목",
+    "author": "저자 이름",
+    "publisher": "출판사 이름",
+    "language": "ko"
+}
+
+response = requests.post(url, files=files, params=params)
+
+if response.status_code == 200:
+    with open("output.zip", "wb") as f:
+        f.write(response.content)
+    print("변환 완료: output.zip")
+else:
+    print(f"오류: {response.json()}")
 ```
 
-### 명령행 옵션
+API 사용 예시 (cURL):
+```bash
+curl -X POST "http://localhost:8000/convert/" \
+     -H "accept: application/json" \
+     -H "Content-Type: multipart/form-data" \
+     -F "file=@input.docx" \
+     -F "title=책 제목" \
+     -F "author=저자 이름" \
+     -F "publisher=출판사 이름" \
+     -F "language=ko" \
+     --output output.zip
+```
 
-- `input_file`: 변환할 DOCX 파일 경로 (필수)
-- `-o, --output-dir`: 출력 디렉토리 (기본값: output_daisy_from_docx)
-- `--title`: 책 제목 (기본값: DOCX 파일명)
-- `--author`: 저자 (기본값: "작성자")
-- `--publisher`: 출판사 (기본값: "출판사")
-- `--language`: 언어 코드 (ISO 639-1) (기본값: ko)
-- `--zip`: 출력 파일들을 ZIP으로 압축
-- `--zip-filename`: ZIP 파일 이름 (기본값: output_dir과 동일한 이름에 .zip 확장자)
+### API 파라미터
+
+- `file`: 변환할 DOCX 파일 (필수)
+- `title`: 책 제목 (선택 사항)
+- `author`: 저자 (선택 사항)
+- `publisher`: 출판사 (선택 사항)
+- `language`: 언어 코드 (ISO 639-1) (기본값: ko)
 
 ### 지원하는 마커
 
