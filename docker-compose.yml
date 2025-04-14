@@ -1,0 +1,58 @@
+version: '3'
+
+services:
+  # Redis 서비스
+  redis:
+    image: redis:alpine
+    ports:
+      - "6389:6379"
+    volumes:
+      - redis_data:/data
+    restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # API 서버
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - QUEUE_NAME=daisy_queue
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: always
+    command: ["docx-to-daisy-api", "--host", "0.0.0.0", "--port", "8000"]
+    volumes:
+      - temp_data:/tmp
+
+  # 작업 처리 워커
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - QUEUE_NAME=daisy_queue
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: always
+    command: ["docx-to-daisy-worker", "--workers", "4"]
+    volumes:
+      - temp_data:/tmp
+
+volumes:
+  redis_data:
+  temp_data: 

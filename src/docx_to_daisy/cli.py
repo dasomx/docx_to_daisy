@@ -98,7 +98,10 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     if book_publisher is None:
         book_publisher = "출판사"
 
-    book_uid = f"AUTO-UID-{uuid.uuid4().int}-packaged"  # 고유 식별자
+    # book_uid = f"AUTO-UID-{uuid.uuid4().int}-packaged"  # 고유 식별자
+    # book_uid에 책 제목을 포함시켜 DAISY 열 때 표시될 이름 설정
+    safe_title = book_title.replace(" ", "_").replace("/", "_").replace("\\", "_").replace(":", "_")
+    book_uid = f"BOOK-{safe_title}"  # 제목을 포함한 식별자
 
     # --- 출력 디렉토리 생성 ---
     os.makedirs(output_dir, exist_ok=True)
