@@ -90,19 +90,6 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             return unique_desc[0]
         return None
     
-    # --- 기본 정보 설정 ---
-    if book_title is None:
-        book_title = os.path.splitext(os.path.basename(docx_file_path))[0]
-    if book_author is None:
-        book_author = "작성자"
-    if book_publisher is None:
-        book_publisher = "출판사"
-
-    # book_uid = f"AUTO-UID-{uuid.uuid4().int}-packaged"  # 고유 식별자
-    # book_uid에 책 제목을 포함시켜 DAISY 열 때 표시될 이름 설정
-    safe_title = book_title.replace(" ", "_").replace("/", "_").replace("\\", "_").replace(":", "_")
-    book_uid = f"BOOK-{safe_title}"  # 제목을 포함한 식별자
-
     # --- 출력 디렉토리 생성 ---
     os.makedirs(output_dir, exist_ok=True)
 
@@ -116,15 +103,59 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
         print(f"오류: DOCX 파일을 읽는 중 오류가 발생했습니다 - {str(e)}")
         return
 
+    # --- 기본 정보 설정 ---
+    # 메타데이터에서 제목 추출 시도
+    try:
+        core_props = document.core_properties
+        if core_props.title and isinstance(core_props.title, str) and len(core_props.title.strip()) > 0:
+            book_title = core_props.title
+            print(f"문서 메타데이터에서 제목 추출: {book_title}")
+        else:
+            raise ValueError("DOCX 속성에 제목이 없거나 비어 있습니다. 변환을 진행할 수 없습니다.")
+    except Exception as e:
+        print(f"메타데이터 읽기 실패: {str(e)}")
+        raise ValueError(f"DOCX 속성에서 제목을 읽을 수 없거나, 제목이 비어 있습니다.")
+    
+    # 메타데이터에서 저자 정보 추출 시도
+    try:
+        core_props = document.core_properties
+        if core_props.author and isinstance(core_props.author, str) and len(core_props.author.strip()) > 0:
+            book_author = core_props.author
+            print(f"문서 메타데이터에서 저자 추출: {book_author}")
+        else:
+            raise ValueError("DOCX 속성에 저자 정보가 없거나 비어 있습니다. 변환을 진행할 수 없습니다.")
+    except Exception as e:
+        print(f"메타데이터 읽기 실패: {str(e)}")
+        raise ValueError(f"DOCX 속성에서 저자 정보를 읽을 수 없거나, 저자 정보가 비어 있습니다")
+    
+    # book_publisher = "출판사"
+
+    book_title = str(book_title)
+    book_author = str(book_author)
+    # book_publisher = str(book_publisher)
+
+
+    # book_uid에 책 제목을 포함시켜 DAISY 열 때 표시될 이름 설정
+    safe_title = book_title.replace(" ", "_").replace("/", "_").replace("\\", "_").replace(":", "_")
+    
+    book_uid = f"BOOK-{safe_title}"  # 제목을 포함한 식별자
+    print("book_uid", book_uid)
+
     content_structure = []
     element_counter = 0
     sent_counter = 0
 
+    # doctitle과 docauthor를 위한 ID 미리 할당
+    doctitle_id = "id_1"
+    docauthor_id = "id_2"
+    sent_counter = 2  # doctitle과 docauthor 이후부터 시작
+    element_counter = 2  # doctitle과 docauthor 이후부터 시작
+
     # 이미지 처리 개선
     print("이미지 처리 중...")
-    # 이미지 저장 디렉토리 생성
-    images_dir = os.path.join(output_dir, "images")
-    os.makedirs(images_dir, exist_ok=True)
+    # 이미지 저장 디렉토리 생성 - 루트 디렉토리에 직접 저장하므로 별도 디렉토리 생성 불필요
+    # images_dir = os.path.join(output_dir, "images")
+    # os.makedirs(images_dir, exist_ok=True)
     
     # 이미지 관련 정보 저장 변수
     image_info = {}  # 이미지 번호 -> {제목, 설명, 위치} 매핑
@@ -248,8 +279,8 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             if not image_ext:  # 확장자가 없으면 기본값 사용
                 image_ext = ".jpeg"
             
-            image_filename = f"image_{img_num}{image_ext}"
-            image_path = os.path.join(images_dir, image_filename)
+            image_filename = f"image{img_num}{image_ext}"
+            image_path = os.path.join(output_dir, image_filename)
             
             # 이미지 데이터 추출 및 저장
             image_data = rel.target_part.blob
@@ -276,14 +307,14 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             # 이미지 정보를 content_structure에 추가
             content_structure.append({
                 "type": "image",
-                "src": f"images/{image_filename}",
+                "src": image_filename,
                 "alt_text": alt_text,
                 "title": img_title,
                 "id": elem_id,
                 "sent_id": sent_id,
                 "level": 0,
                 "markers": [],
-                "smil_file": "mo.smil",
+                "smil_file": "dtbook.smil",
                 "position": img_position,
                 "insert_before": False,
                 "description": clean_desc,
@@ -337,7 +368,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                     "sent_id": sent_id,
                     "level": 0,
                     "markers": [marker],
-                    "smil_file": "mo.smil",
+                    "smil_file": "dtbook.smil",
                     "position": para_idx,
                     "insert_before": True  # 단락 앞에 페이지 번호 삽입
                 })
@@ -369,7 +400,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                     3 if style_name.startswith('heading 3') or style_name == '제목 3' else
                     0,
             "markers": markers,
-            "smil_file": "mo.smil",
+            "smil_file": "dtbook.smil",
             "position": para_idx,
             "insert_before": False  # 일반 텍스트는 순서대로 삽입
         })
@@ -451,7 +482,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                 "sent_id": sent_id,
                 "level": 0,
                 "markers": [],
-                "smil_file": "mo.smil",
+                "smil_file": "dtbook.smil",
                 "position": table_position,  # 표의 실제 위치 사용
                 "insert_before": False,
                 "title": table_title,
@@ -511,9 +542,9 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     meta_author = etree.SubElement(head, "meta",
                                    name="dc:Creator",
                                    content=book_author)
-    meta_publisher = etree.SubElement(head, "meta",
-                                      name="dc:Publisher",
-                                      content=book_publisher)
+    # meta_publisher = etree.SubElement(head, "meta",
+    #                                   name="dc:Publisher",
+    #                                   content=book_publisher)
     meta_language = etree.SubElement(head, "meta",
                                      name="dc:Language",
                                      content=book_language)
@@ -535,28 +566,26 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     # frontmatter 추가
     dtbook_frontmatter = etree.SubElement(dtbook_book, "frontmatter")
 
-    # doctitle과 docauthor 추가 (단어 단위로 분리)
-    doctitle = etree.SubElement(dtbook_frontmatter, "doctitle",
-                                id="forsmil-1",
-                                smilref="mo.smil#sforsmil-1")
-    sent_counter += 1
-    sent = etree.SubElement(doctitle, "sent",
-                            id=f"id_{sent_counter}",
-                            smilref=f"mo.smil#sid_{sent_counter}")
-    for word in split_text_to_words(book_title):
-        w = etree.SubElement(sent, "w")
-        w.text = word
+    # doctitle과 docauthor 추가
+    doctitle_seq = etree.SubElement(dtbook_frontmatter, "doctitle",
+                                    id="forsmil-1",
+                                    smilref="dtbook.smil#sforsmil-1")
+    sent = etree.SubElement(doctitle_seq, "sent",
+                            id=doctitle_id,
+                            smilref=f"dtbook.smil#s{doctitle_id}")
+    # 한글 텍스트를 직접 설정 (명시적 인코딩 처리)
+    text_elem = etree.SubElement(sent, "text")
+    text_elem.text = book_title
 
     docauthor = etree.SubElement(dtbook_frontmatter, "docauthor",
                                  id="forsmil-2",
-                                 smilref="mo.smil#sforsmil-2")
-    sent_counter += 1
+                                 smilref="dtbook.smil#sforsmil-2")
     sent = etree.SubElement(docauthor, "sent",
-                            id=f"id_{sent_counter}",
-                            smilref=f"mo.smil#sid_{sent_counter}")
-    for word in split_text_to_words(book_author):
-        w = etree.SubElement(sent, "w")
-        w.text = word
+                            id=docauthor_id,
+                            smilref=f"dtbook.smil#s{docauthor_id}")
+    # 한글 텍스트를 직접 설정 (명시적 인코딩 처리)
+    text_elem = etree.SubElement(sent, "text")
+    text_elem.text = book_author
 
     # bodymatter 추가
     dtbook_bodymatter = etree.SubElement(dtbook_book, "bodymatter")
@@ -819,17 +848,22 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     dtbook_filepath = os.path.join(output_dir, "dtbook.xml")
     tree = etree.ElementTree(dtbook_root)
 
+    # XML 선언에 인코딩 명시적 지정
     with open(dtbook_filepath, 'wb') as f:
-        f.write(b'<?xml version="1.0" encoding="utf-8"?>\n')
-        f.write(b'<!DOCTYPE dtbook\n  PUBLIC "-//NISO//DTD dtbook 2005-3//EN" "http://www.daisy.org/z3986/2005/dtbook-2005-3.dtd">\n')
+        # XML 선언
+        f.write('<?xml version="1.0" encoding="utf-8" standalone="no"?>\n'.encode('utf-8'))
+        # DTD 선언
+        f.write('<!DOCTYPE dtbook PUBLIC "-//NISO//DTD dtbook 2005-3//EN" "http://www.daisy.org/z3986/2005/dtbook-2005-3.dtd">\n'.encode('utf-8'))
+        # XML 트리 저장 - 명시적으로 인코딩 지정
         tree.write(f,
-                   pretty_print=True,
-                   encoding='utf-8',
-                   xml_declaration=False)
+                  encoding='utf-8',
+                  pretty_print=True,
+                  xml_declaration=False,
+                  method='xml')
 
     print(f"DTBook 생성 완료: {dtbook_filepath}")
 
-    # --- 2. OPF 파일 생성 (book.opf) ---
+    # --- 2. OPF 파일 생성 (dtbook.opf) ---
     print("OPF 생성 중...")
     opf_ns = "http://openebook.org/namespaces/oeb-package/1.0/"
     dc_ns = "http://purl.org/dc/elements/1.1/"
@@ -862,9 +896,9 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
         dc_metadata, "{%s}Date" % dc_ns, nsmap={'dc': dc_ns})
     date_elem.text = datetime.now().strftime("%Y-%m-%d")
 
-    publisher_elem = etree.SubElement(
-        dc_metadata, "{%s}Publisher" % dc_ns, nsmap={'dc': dc_ns})
-    publisher_elem.text = book_publisher
+    # publisher_elem = etree.SubElement(
+    #     dc_metadata, "{%s}Publisher" % dc_ns, nsmap={'dc': dc_ns})
+    # publisher_elem.text = book_publisher
 
     title_elem = etree.SubElement(
         dc_metadata, "{%s}Title" % dc_ns, nsmap={'dc': dc_ns})
@@ -895,7 +929,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
 
     # OPF
     etree.SubElement(manifest, "item",
-                     href="book.opf",
+                     href="dtbook.opf",
                      id="opf",
                      **{"media-type": "text/xml"})
 
@@ -907,19 +941,19 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
 
     # SMIL 파일들
     etree.SubElement(manifest, "item",
-                     href="mo.smil",
+                     href="dtbook.smil",
                      id="mo",
                      **{"media-type": "application/smil"})
 
     # NCX
     etree.SubElement(manifest, "item",
-                     href="navigation.ncx",
+                     href="dtbook.ncx",
                      id="ncx",
                      **{"media-type": "application/x-dtbncx+xml"})
 
     # Resources
     etree.SubElement(manifest, "item",
-                     href="resources.res",
+                     href="dtbook.res",
                      id="resource",
                      **{"media-type": "application/x-dtbresource+xml"})
 
@@ -953,20 +987,21 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                              **{"media-type": mime_type})
 
     # OPF 파일 저장
-    opf_filepath = os.path.join(output_dir, "book.opf")
+    opf_filepath = os.path.join(output_dir, "dtbook.opf")
     tree = etree.ElementTree(opf_root)
 
     with open(opf_filepath, 'wb') as f:
-        f.write(b'<?xml version="1.0" encoding="utf-8"?>\n')
-        f.write(b'<!DOCTYPE package\n  PUBLIC "+//ISBN 0-9673008-1-9//DTD OEB 1.2 Package//EN" "http://openebook.org/dtds/oeb-1.2/oebpkg12.dtd">\n')
+        f.write('<?xml version="1.0" encoding="utf-8" standalone="no"?>\n'.encode('utf-8'))
+        f.write('<!DOCTYPE package PUBLIC "+//ISBN 0-9673008-1-9//DTD OEB 1.2 Package//EN" "http://openebook.org/dtds/oeb-1.2/oebpkg12.dtd">\n'.encode('utf-8'))
         tree.write(f,
-                   pretty_print=True,
-                   encoding='utf-8',
-                   xml_declaration=False)
+                  encoding='utf-8',
+                  pretty_print=True,
+                  xml_declaration=False,
+                  method='xml')
 
     print(f"OPF 생성 완료: {opf_filepath}")
 
-    # --- 3. SMIL 파일 생성 (mo.smil) ---
+    # --- 3. SMIL 파일 생성 (dtbook.smil) ---
     print("SMIL 파일 생성 중...")
 
     smil_ns = "http://www.w3.org/2001/SMIL20/"
@@ -1007,19 +1042,19 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                                     id="sforsmil-1",
                                     **{"class": "doctitle"})
     doctitle_par = etree.SubElement(doctitle_seq, "par",
-                                    id=f"sid_{sent_counter-1}",
+                                    id="sid_1",
                                     **{"class": "sent"})
     etree.SubElement(doctitle_par, "text",
-                     src=f"dtbook.xml#id_{sent_counter-1}")
+                     src="dtbook.xml#id_1")
 
     docauthor_seq = etree.SubElement(root_seq, "seq",
                                      id="sforsmil-2",
                                      **{"class": "docauthor"})
     docauthor_par = etree.SubElement(docauthor_seq, "par",
-                                     id=f"sid_{sent_counter}",
+                                     id="sid_2",
                                      **{"class": "sent"})
     etree.SubElement(docauthor_par, "text",
-                     src=f"dtbook.xml#id_{sent_counter}")
+                     src="dtbook.xml#id_2")
 
     # 나머지 콘텐츠 추가
     for item in content_structure:
@@ -1080,20 +1115,21 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                                  src=elem_info["text_src"])
 
     # SMIL 파일 저장
-    smil_filepath = os.path.join(output_dir, "mo.smil")
+    smil_filepath = os.path.join(output_dir, "dtbook.smil")
     tree = etree.ElementTree(smil_root)
 
     with open(smil_filepath, 'wb') as f:
-        f.write(b'<?xml version="1.0" encoding="utf-8"?>\n')
-        f.write(b'<!DOCTYPE smil\n  PUBLIC "-//NISO//DTD dtbsmil 2005-2//EN" "http://www.daisy.org/z3986/2005/dtbsmil-2005-2.dtd">\n')
+        f.write('<?xml version="1.0" encoding="utf-8" standalone="no"?>\n'.encode('utf-8'))
+        f.write('<!DOCTYPE smil PUBLIC "-//NISO//DTD dtbsmil 2005-2//EN" "http://www.daisy.org/z3986/2005/dtbsmil-2005-2.dtd">\n'.encode('utf-8'))
         tree.write(f,
-                   pretty_print=True,
-                   encoding='utf-8',
-                   xml_declaration=False)
+                  encoding='utf-8',
+                  pretty_print=True,
+                  xml_declaration=False,
+                  method='xml')
 
     print(f"SMIL 파일 생성 완료: {smil_filepath}")
 
-    # --- 4. NCX 파일 생성 (navigation.ncx) ---
+    # --- 4. NCX 파일 생성 (dtbook.ncx) ---
     print("NCX 생성 중...")
     ncx_ns = "http://www.daisy.org/z3986/2005/ncx/"
 
@@ -1236,7 +1272,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                                        src=f"{note['smil_file']}#s{note['item_id']}")
 
     # NCX 파일 저장
-    ncx_filepath = os.path.join(output_dir, "navigation.ncx")
+    ncx_filepath = os.path.join(output_dir, "dtbook.ncx")
     tree = etree.ElementTree(ncx_root)
 
     with open(ncx_filepath, 'wb') as f:
@@ -1249,7 +1285,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
 
     print(f"NCX 생성 완료: {ncx_filepath}")
 
-    # --- 5. Resources 파일 생성 (resources.res) ---
+    # --- 5. Resources 파일 생성 (dtbook.res) ---
     print("Resources 생성 중...")
     res_ns = "http://www.daisy.org/z3986/2005/resource/"
 
@@ -1307,7 +1343,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
         text_elem.text = text
 
     # Resources 파일 저장
-    res_filepath = os.path.join(output_dir, "resources.res")
+    res_filepath = os.path.join(output_dir, "dtbook.res")
     tree = etree.ElementTree(res_root)
 
     with open(res_filepath, 'wb') as f:
@@ -1327,6 +1363,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
 
 
 def zip_daisy_output(source_dir, output_zip_filename):
+
     """
     지정된 폴더의 내용을 ZIP 파일로 압축합니다.
 

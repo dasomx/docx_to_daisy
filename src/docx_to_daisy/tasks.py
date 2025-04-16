@@ -128,11 +128,53 @@ def process_conversion_task(file_path, output_path, title=None, author=None, pub
             update_job_progress(job_id, 20, "DAISY 파일 생성 중...")
         
         logger.info("DAISY 파일 생성 시작")
+        
+        # 메타데이터 추출을 위한 임시 함수
+        def extract_metadata(docx_file_path):
+            from docx import Document
+            try:
+                document = Document(docx_file_path)
+                core_props = document.core_properties
+                
+                extracted_title = title
+                extracted_author = author
+                
+                # 메타데이터에서 제목 추출 시도
+                if core_props.title and isinstance(core_props.title, str) and len(core_props.title.strip()) > 0:
+                    extracted_title = core_props.title
+                    logger.info(f"문서 메타데이터에서 제목 추출: {extracted_title}")
+                
+                # 메타데이터에서 저자 정보 추출 시도
+                if core_props.author and isinstance(core_props.author, str) and len(core_props.author.strip()) > 0:
+                    extracted_author = core_props.author
+                    logger.info(f"문서 메타데이터에서 저자 추출: {extracted_author}")
+                
+                return extracted_title, extracted_author
+            except Exception as e:
+                logger.error(f"메타데이터 추출 중 오류 발생: {str(e)}")
+                return title, author
+        
+        # 메타데이터 추출
+        extracted_title, extracted_author = extract_metadata(file_path)
+        
+        # 추출된 메타데이터로 작업 상태 업데이트
+        if job_id:
+            update_job_progress(
+                job_id, 
+                30, 
+                "메타데이터 추출 완료, DAISY 파일 생성 중...", 
+                {
+                    "extracted_title": extracted_title,
+                    "extracted_author": extracted_author
+                }
+            )
+        
+        # DAISY 파일 생성 (추출된 메타데이터 사용)
         create_daisy_book(
             docx_file_path=file_path,
             output_dir=str(output_dir),
-            book_title=title,
-            book_author=author,
+            book_title=extracted_title,
+            book_author=extracted_author,
             book_publisher=publisher,
             book_language=language
         )
@@ -153,7 +195,11 @@ def process_conversion_task(file_path, output_path, title=None, author=None, pub
         cleanup_temp_files(output_dir)
         
         if job_id:
-            update_job_progress(job_id, 100, "변환 작업이 완료되었습니다.", {"output_path": output_path})
+            update_job_progress(job_id, 100, "변환 작업이 완료되었습니다.", {
+                "output_path": output_path,
+                "extracted_title": extracted_title,
+                "extracted_author": extracted_author
+            })
         
         return output_path
     

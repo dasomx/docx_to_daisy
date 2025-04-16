@@ -2,11 +2,11 @@ import os
 import tempfile
 import uuid
 import logging
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Form, WebSocket, WebSocketDisconnect, Depends, Path, Query, Request, Response
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Form, WebSocket, WebSocketDisconnect, Depends, Query, Request, Response
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import shutil
-from pathlib import Path as PathLib
+from pathlib import Path
 from typing import Optional, Dict, Any, Callable
 import urllib.parse
 import redis
@@ -14,6 +14,7 @@ from rq import Queue
 from rq.job import Job, NoSuchJobError
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.types import ASGIApp
+from fastapi.params import Path as FastAPIPath
 
 from .cli import create_daisy_book, zip_daisy_output
 from .tasks import process_conversion_task
@@ -91,11 +92,11 @@ REDIS_PASSWORD = os.environ.get('REDIS_PASSWORD', None)
 QUEUE_NAME = os.environ.get('QUEUE_NAME', 'daisy_queue')
 
 # 임시 파일 저장 디렉토리
-TEMP_DIR = PathLib(tempfile.gettempdir()) / "docx_to_daisy_api"
+TEMP_DIR = Path(tempfile.gettempdir()) / "docx_to_daisy_api"
 TEMP_DIR.mkdir(exist_ok=True)
 
 # 변환 결과 저장 디렉토리
-RESULTS_DIR = PathLib(tempfile.gettempdir()) / "docx_to_daisy_results"
+RESULTS_DIR = Path(tempfile.gettempdir()) / "docx_to_daisy_results"
 RESULTS_DIR.mkdir(exist_ok=True)
 
 # 작업 상태 (Redis에 저장되지만 여기서는 메모리에 임시 저장)
@@ -200,7 +201,7 @@ async def convert_docx_to_daisy(
         raise HTTPException(status_code=500, detail=f"변환 작업 등록 중 오류가 발생했습니다: {str(e)}")
 
 @app.get("/task/{task_id}")
-async def get_task_status(task_id: str = Path(..., description="변환 작업 ID")):
+async def get_task_status(task_id: str = FastAPIPath(..., description="변환 작업 ID")):
     """
     주어진 작업 ID에 대한 변환 작업 상태를 반환합니다.
     """
@@ -236,6 +237,15 @@ async def get_task_status(task_id: str = Path(..., description="변환 작업 ID
                     "message": message,
                     "updated_at": updated_at
                 })
+                
+                # 추출된 메타데이터 추가
+                extracted_title = job_meta.get('extracted_title')
+                extracted_author = job_meta.get('extracted_author')
+                
+                if extracted_title:
+                    response["extracted_title"] = extracted_title
+                if extracted_author:
+                    response["extracted_author"] = extracted_author
             
             # 로컬 상태 정보 추가
             if task_id in job_statuses:
@@ -294,7 +304,7 @@ async def get_task_status(task_id: str = Path(..., description="변환 작업 ID
         raise HTTPException(status_code=500, detail=f"작업 상태 조회 중 오류가 발생했습니다: {str(e)}")
 
 @app.get("/download/{task_id}")
-async def download_result(task_id: str = Path(..., description="다운로드할 변환 작업 ID")):
+async def download_result(task_id: str = FastAPIPath(..., description="다운로드할 변환 작업 ID")):
     """
     완료된 변환 작업의 결과를 다운로드합니다.
     """
@@ -311,7 +321,7 @@ async def download_result(task_id: str = Path(..., description="다운로드할 
         # 파일명 설정
         if task_id in job_statuses and job_statuses[task_id].get("filename"):
             original_filename = job_statuses[task_id]["filename"]
-            filename = f"{PathLib(original_filename).stem}_daisy.zip"
+            filename = f"{Path(original_filename).stem}.zip"
         else:
             filename = f"daisy_{task_id}.zip"
         
@@ -440,9 +450,9 @@ async def convert_docx_to_daisy_batch(
         # 파일별 제목 생성 (접두사 + 파일명)
         file_title = title
         if title:
-            file_title = f"{title} - {PathLib(file.filename).stem}"
+            file_title = f"{title} - {Path(file.filename).stem}"
         else:
-            file_title = PathLib(file.filename).stem
+            file_title = Path(file.filename).stem
             
         # 임시 파일 경로 설정
         temp_docx_path = TEMP_DIR / f"{task_id}.docx"
