@@ -237,15 +237,6 @@ async def get_task_status(task_id: str = FastAPIPath(..., description="변환 �
                     "message": message,
                     "updated_at": updated_at
                 })
-                
-                # 추출된 메타데이터 추가
-                extracted_title = job_meta.get('extracted_title')
-                extracted_author = job_meta.get('extracted_author')
-                
-                if extracted_title:
-                    response["extracted_title"] = extracted_title
-                if extracted_author:
-                    response["extracted_author"] = extracted_author
             
             # 로컬 상태 정보 추가
             if task_id in job_statuses:
@@ -409,9 +400,7 @@ def cleanup_old_results():
 @app.post("/convert-batch")
 async def convert_docx_to_daisy_batch(
     files: list[UploadFile] = File(...),
-    title: Optional[str] = Form(None),
-    author: Optional[str] = Form(None),
-    publisher: Optional[str] = Form(None),
+    metadata: Optional[str] = Form(None),
     language: str = Form("ko"),
     background_tasks: BackgroundTasks = None
 ):
@@ -419,12 +408,28 @@ async def convert_docx_to_daisy_batch(
     여러 DOCX 파일을 일괄 업로드하여 DAISY 형식으로 변환합니다.
     
     - **files**: 변환할 DOCX 파일 목록
-    - **title**: 책 제목 접두사 (선택 사항, 파일별로 파일명이 추가됨)
-    - **author**: 저자 (선택 사항)
-    - **publisher**: 출판사 (선택 사항)
+    - **metadata**: 파일별 메타데이터 (JSON 형식, 선택 사항)
+        예: [{"title": "제목1", "author": "저자1", "publisher": "출판사1"}, 
+             {"title": "제목2", "author": "저자2", "publisher": "출판사2"}]
     - **language**: 언어 코드 (기본값: ko)
     """
-    logger.info(f"일괄 변환 요청 받음: 파일 수={len(files)}, 제목 접두사={title}, 저자={author}, 출판사={publisher}, 언어={language}")
+    logger.info(f"일괄 변환 요청 받음: 파일 수={len(files)}, 메타데이터={metadata}, 언어={language}")
+    
+    # 메타데이터 파싱
+    metadata_list = []
+    if metadata:
+        try:
+            import json
+            metadata_list = json.loads(metadata)
+            if not isinstance(metadata_list, list):
+                raise ValueError("메타데이터는 배열 형식이어야 합니다.")
+             
+            # 메타데이터 개수가 파일 개수와 일치하는지 확인
+            if len(metadata_list) != len(files):
+                logger.warning(f"메타데이터 개수({len(metadata_list)})와 파일 개수({len(files)})가 일치하지 않습니다.")
+        except Exception as e:
+            logger.error(f"메타데이터 파싱 오류: {str(e)}")
+            raise HTTPException(status_code=400, detail=f"메타데이터 형식이 올바르지 않습니다: {str(e)}")
     
     # 파일 수 제한 (필요시 조정)
     if len(files) > 10:
@@ -433,7 +438,7 @@ async def convert_docx_to_daisy_batch(
     # 응답 준비
     response_tasks = []
     
-    for file in files:
+    for i, file in enumerate(files):
         # 파일 확장자 확인
         if not file.filename.lower().endswith('.docx'):
             logger.error(f"잘못된 파일 형식: {file.filename}")
@@ -447,11 +452,14 @@ async def convert_docx_to_daisy_batch(
         # 고유 ID 생성
         task_id = str(uuid.uuid4())
         
+        # 파일별 메타데이터 가져오기
+        file_metadata = metadata_list[i] if i < len(metadata_list) else {}
+        file_title = file_metadata.get("title")
+        file_author = file_metadata.get("author")
+        file_publisher = file_metadata.get("publisher")
+        
         # 파일별 제목 생성 (접두사 + 파일명)
-        file_title = title
-        if title:
-            file_title = f"{title} - {Path(file.filename).stem}"
-        else:
+        if not file_title:
             file_title = Path(file.filename).stem
             
         # 임시 파일 경로 설정
@@ -473,8 +481,8 @@ async def convert_docx_to_daisy_batch(
                     str(temp_docx_path),
                     str(zip_file_path),
                     file_title,
-                    author,
-                    publisher,
+                    file_author,
+                    file_publisher,
                     language
                 ),
                 job_id=task_id,
@@ -489,8 +497,8 @@ async def convert_docx_to_daisy_batch(
                 "status": "queued",
                 "filename": file.filename,
                 "title": file_title,
-                "author": author,
-                "publisher": publisher,
+                "author": file_author,
+                "publisher": file_publisher,
                 "language": language
             }
             

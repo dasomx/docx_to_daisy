@@ -104,29 +104,13 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
         return
 
     # --- 기본 정보 설정 ---
-    # 메타데이터에서 제목 추출 시도
-    try:
-        core_props = document.core_properties
-        if core_props.title and isinstance(core_props.title, str) and len(core_props.title.strip()) > 0:
-            book_title = core_props.title
-            print(f"문서 메타데이터에서 제목 추출: {book_title}")
-        else:
-            raise ValueError("DOCX 속성에 제목이 없거나 비어 있습니다. 변환을 진행할 수 없습니다.")
-    except Exception as e:
-        print(f"메타데이터 읽기 실패: {str(e)}")
-        raise ValueError(f"DOCX 속성에서 제목을 읽을 수 없거나, 제목이 비어 있습니다.")
+    # book_title 확인
+    if book_title is None or not isinstance(book_title, str) or len(book_title.strip()) == 0:
+        raise ValueError("책 제목이 제공되지 않았거나 유효하지 않습니다. 변환을 진행할 수 없습니다.")
     
-    # 메타데이터에서 저자 정보 추출 시도
-    try:
-        core_props = document.core_properties
-        if core_props.author and isinstance(core_props.author, str) and len(core_props.author.strip()) > 0:
-            book_author = core_props.author
-            print(f"문서 메타데이터에서 저자 추출: {book_author}")
-        else:
-            raise ValueError("DOCX 속성에 저자 정보가 없거나 비어 있습니다. 변환을 진행할 수 없습니다.")
-    except Exception as e:
-        print(f"메타데이터 읽기 실패: {str(e)}")
-        raise ValueError(f"DOCX 속성에서 저자 정보를 읽을 수 없거나, 저자 정보가 비어 있습니다")
+    # book_author 확인
+    if book_author is None or not isinstance(book_author, str) or len(book_author.strip()) == 0:
+        raise ValueError("저자 정보가 제공되지 않았거나 유효하지 않습니다. 변환을 진행할 수 없습니다.")
     
     # book_publisher = "출판사"
 
@@ -173,7 +157,6 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
         # 이미지 제목 패턴 찾기
         match = image_pattern.search(para.text)
         if match:
-            img_num = match.group(1)  # 이미지 번호 (없을 수 있음)
             # 제목 추출 - [그림 N] 또는 [그림] 이후의 모든 텍스트
             title_parts = para.text.split(']', 1)
             img_title = title_parts[1].strip() if len(title_parts) > 1 else para.text.strip()
@@ -182,9 +165,8 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             img_type = "그림" if "[그림" in para.text else "사진"
             
             # 이미지 번호가 없는 경우 자동으로 번호 할당
-            if not img_num:
-                img_num = str(len(image_info) + 1)
-                print(f"이미지 번호가 없어 자동으로 번호 할당: {img_num}")
+            img_num = str(len(image_info) + 1)
+            print(f"이미지 번호 자동으로 번호 할당: {img_num}")
             
             image_info[img_num] = {
                 'title': img_title,
@@ -258,13 +240,29 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                 }
                 print(f"이미지 {img_num}에 대한 정보가 없어 기본 정보 생성")
 
-    # 3. 이미지 순서 정렬
-    # 이미지 번호를 기준으로 정렬된 이미지 목록 생성
-    sorted_image_nums = sorted(image_mapping.keys(), key=lambda x: int(x) if x.isdigit() else float('inf'))
-
-    # 정렬된 이미지 목록을 사용하여 content_structure에 추가
-    for img_num in sorted_image_nums:
-        rel = image_mapping[img_num]
+    # 3. 이미지 순서 정렬 - 이미지가 발견되는 순서대로 번호 부여
+    # 이미지 번호를 기준으로 정렬하는 대신 이미지 관계의 순서대로 처리
+    image_counter = 0
+    for i, rel in enumerate(image_relations):
+        # 이미지 관계의 인덱스를 기준으로 이미지 번호 할당
+        img_num = str(i + 1)
+        
+        # 이미지 매핑에서 해당 번호의 이미지 관계 가져오기
+        if img_num in image_mapping:
+            rel = image_mapping[img_num]
+        else:
+            # 매핑에 없는 경우 현재 이미지 관계 사용
+            rel = image_relations[i]
+            # 이미지 정보가 없는 경우 기본 정보 생성
+            if img_num not in image_info:
+                image_info[img_num] = {
+                    'title': f"이미지 {img_num}",
+                    'position': len(document.paragraphs),  # 기본값으로 문서 끝에 배치
+                    'description': [],
+                    'alt_text': f"이미지 {img_num}"
+                }
+                print(f"이미지 {img_num}에 대한 정보가 없어 기본 정보 생성")
+        
         try:
             image_counter += 1
             element_counter += 1
