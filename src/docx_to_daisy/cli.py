@@ -391,6 +391,9 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             "type": "h1" if style_name.startswith('heading 1') or style_name == '제목 1' else
             "h2" if style_name.startswith('heading 2') or style_name == '제목 2' else
             "h3" if style_name.startswith('heading 3') or style_name == '제목 3' else
+            "h4" if style_name.startswith('heading 4') or style_name == '제목 4' else
+            "h5" if style_name.startswith('heading 5') or style_name == '제목 5' else
+            "h6" if style_name.startswith('heading 6') or style_name == '제목 6' else
             "p",
             "text": processed_text,
             "words": words,
@@ -399,6 +402,9 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             "level": 1 if style_name.startswith('heading 1') or style_name == '제목 1' else
                     2 if style_name.startswith('heading 2') or style_name == '제목 2' else
                     3 if style_name.startswith('heading 3') or style_name == '제목 3' else
+                    4 if style_name.startswith('heading 4') or style_name == '제목 4' else
+                    5 if style_name.startswith('heading 5') or style_name == '제목 5' else
+                    6 if style_name.startswith('heading 6') or style_name == '제목 6' else
                     0,
             "markers": markers,
             "smil_file": "dtbook.smil",
@@ -749,7 +755,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                         except Exception as e:
                             print(f"병합 셀 처리 중 오류 발생: {str(e)}")
         elif item["type"].startswith("h"):
-            level = int(item["type"][1])  # h1 -> 1, h2 -> 2, h3 -> 3
+            level = int(item["type"][1])  # h1 -> 1, h2 -> 2, h3 -> 3, h4 -> 4, h5 -> 5, h6 -> 6
 
             if level == 1:
                 # 새로운 level1 시작
@@ -760,7 +766,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                 heading = etree.SubElement(current_level1, "h1")
                 heading.text = " ".join(item["words"])
             else:
-                # level2, level3는 이전 level1 내에 위치
+                # level2~6은 이전 level 내에 위치
                 if current_level1 is None:
                     # level1이 없는 경우 생성
                     current_level1 = etree.SubElement(dtbook_bodymatter, "level1",
@@ -776,7 +782,12 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                 for l in range(2, level):
                     level_elem = parent.find(f"level{l}")
                     if level_elem is None:
-                        break
+                        # 중간 레벨이 없으면 생성
+                        level_elem = etree.SubElement(parent, f"level{l}",
+                                                    id=item["id"],
+                                                    smilref=f"dtbook.smil#smil_par_{item['id']}")
+                        heading = etree.SubElement(level_elem, f"h{l}")
+                        heading.text = f"제목 {l}"
                     parent = level_elem
                     current_level_elem = level_elem
 
@@ -1056,7 +1067,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
         # 기본 콘텐츠
         if item["type"].startswith("h"):
             # 제목 요소일 경우 level로 처리
-            level = int(item["type"][1])  # h1 -> 1, h2 -> 2, h3 -> 3
+            level = int(item["type"][1])  # h1 -> 1, h2 -> 2, h3 -> 3, h4 -> 4, h5 -> 5, h6 -> 6
             par = etree.SubElement(root_seq, "par",
                                  id=f"smil_par_{item['id']}",
                                  **{"class": f"level{level}"})
@@ -1191,10 +1202,13 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     play_order = 1
     current_level1_point = None
     current_level2_point = None
+    current_level3_point = None
+    current_level4_point = None
+    current_level5_point = None
 
     for item in content_structure:
         if item["type"].startswith("h"):
-            level = int(item["type"][1])  # h1 -> 1, h2 -> 2, h3 -> 3
+            level = int(item["type"][1])  # h1 -> 1, h2 -> 2, h3 -> 3, h4 -> 4, h5 -> 5, h6 -> 6
             nav_point = etree.Element("navPoint",
                                      id=f"ncx_{item['id']}",
                                      **{"class": f"level{level}"},
@@ -1205,15 +1219,34 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             content = etree.SubElement(nav_point, "content",
                                        src=f"dtbook.smil#smil_par_{item['id']}")
 
+            # 계층 구조에 맞게 배치
             if level == 1:
                 nav_map.append(nav_point)
                 current_level1_point = nav_point
                 current_level2_point = None
+                current_level3_point = None
+                current_level4_point = None
+                current_level5_point = None
             elif level == 2 and current_level1_point is not None:
                 current_level1_point.append(nav_point)
                 current_level2_point = nav_point
+                current_level3_point = None
+                current_level4_point = None
+                current_level5_point = None
             elif level == 3 and current_level2_point is not None:
                 current_level2_point.append(nav_point)
+                current_level3_point = nav_point
+                current_level4_point = None
+                current_level5_point = None
+            elif level == 4 and current_level3_point is not None:
+                current_level3_point.append(nav_point)
+                current_level4_point = nav_point
+                current_level5_point = None
+            elif level == 5 and current_level4_point is not None:
+                current_level4_point.append(nav_point)
+                current_level5_point = nav_point
+            elif level == 6 and current_level5_point is not None:
+                current_level5_point.append(nav_point)
 
             play_order += 1
         elif item["type"] == "table":
