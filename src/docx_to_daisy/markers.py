@@ -3,6 +3,7 @@
 import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
+import xml.etree.ElementTree as ET
 
 
 @dataclass
@@ -76,24 +77,25 @@ class MarkerProcessor:
         return processed_text, markers
 
     @classmethod
-    def create_dtbook_element(cls, marker: Marker) -> Optional[dict]:
+    def create_dtbook_element(cls, marker: Marker, dtbook_xml):
         """마커에 해당하는 DTBook 요소 정보 생성
 
         Args:
             marker (Marker): 처리할 마커
+            dtbook_xml (ElementTree): 이미 생성된 DTBook XML 트리
 
         Returns:
-            Optional[dict]: DTBook 요소 정보 또는 None
+            Optional[Element]: 생성된 DTBook 요소 또는 None
         """
         if marker.type == 'page':
-            return {
-                'tag': 'pagenum',
-                'attrs': {
-                    'id': f'page_{marker.value}',
-                    'page': marker.value
-                },
-                'text': marker.value
-            }
+            # Add a pagenum tag to the DTBook xml, if the dtbook_xml is already created
+            if dtbook_xml.find(".//{http://www.daisy.org/z3986/2005/dtbook/}pagenum[@id='page_{0}_{0}']".format(marker.value)) is None:
+                pagenum = ET.Element("{http://www.daisy.org/z3986/2005/dtbook/}pagenum")
+                pagenum.set("id", "page_{0}_{0}".format(marker.value))
+                pagenum.set("page", "normal")
+                pagenum.set("smilref", "dtbook.smil#smil_par_page_{0}_{0}".format(marker.value))
+                pagenum.text = str(marker.value)
+                return pagenum
         elif marker.type == 'note':
             return {
                 'tag': 'note',
@@ -121,12 +123,12 @@ class MarkerProcessor:
         return None
 
     @classmethod
-    def create_smil_element(cls, marker: Marker, dtbook_id: str) -> Optional[dict]:
+    def create_smil_element(cls, marker: Marker, dtbook_path):
         """마커에 해당하는 SMIL 요소 정보 생성
 
         Args:
             marker (Marker): 처리할 마커
-            dtbook_id (str): 관련된 DTBook 요소의 ID
+            dtbook_path (str): DTBook 파일의 경로
 
         Returns:
             Optional[dict]: SMIL 요소 정보 또는 None
@@ -135,7 +137,7 @@ class MarkerProcessor:
             return {
                 'seq_class': 'pagenum',
                 'par_class': 'pagenum',
-                'text_src': f'dtbook.xml#page_{marker.value}'
+                'text_src': f'dtbook.xml#page_{marker.value}_{marker.value}'
             }
         elif marker.type == 'note':
             return {
