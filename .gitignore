@@ -48,3 +48,5 @@ test_*
 ~$*
 output*
 TestDoc
+result
+sample
