@@ -3,10 +3,15 @@ import os
 import uuid
 import argparse
 import re
+import logging
 from docx import Document  # python-docx 라이브러리
 from lxml import etree  # lxml 라이브러리
 from datetime import datetime
 from .markers import MarkerProcessor  # 마커 처리기 임포트
+
+# 로깅 설정
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 def split_text_to_words(text):
@@ -61,6 +66,139 @@ def split_text_to_words(text):
         result.append(word)
 
     return result
+
+
+def find_all_images(document):
+    """문서에서 모든 이미지와 그 위치를 찾습니다."""
+    images = []
+    # Word 문서의 네임스페이스 정의
+    nsmap = {
+        'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+        'wp': 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing',
+        'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
+        'pic': 'http://schemas.openxmlformats.org/drawingml/2006/picture',
+        'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+    }
+    
+    for para_idx, para in enumerate(document.paragraphs):
+        # 현재 단락의 전체 텍스트
+        current_para_text = para.text
+        
+        # 이전 단락의 텍스트 (있는 경우)
+        prev_para_text = document.paragraphs[para_idx-1].text if para_idx > 0 else ""
+        
+        # 다음 단락의 텍스트 (있는 경우)
+        next_para_text = document.paragraphs[para_idx+1].text if para_idx < len(document.paragraphs)-1 else ""
+        
+        for run_idx, run in enumerate(para.runs):
+            # 이미지 요소 찾기 (네임스페이스 명시)
+            drawing = run._element.find('.//w:drawing', namespaces=nsmap)
+            pict = run._element.find('.//w:pict', namespaces=nsmap)
+            
+            if drawing is not None or pict is not None:
+                # 이미지 관계 ID 찾기
+                blip = None
+                if drawing is not None:
+                    blip = drawing.find('.//a:blip', namespaces=nsmap)
+                elif pict is not None:
+                    blip = pict.find('.//a:blip', namespaces=nsmap)
+                
+                if blip is not None:
+                    # 이미지 관계 ID 추출
+                    embed = blip.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
+                    if embed:
+                        # 이미지 데이터 가져오기
+                        image_part = document.part.related_parts[embed]
+                        image_data = image_part.blob
+                        
+                        # 이미지가 발견되면 앞뒤 텍스트 출력
+                        print(f"\n이미지 발견 (위치: 단락 {para_idx}, 런 {run_idx})")
+                        print(f"이전 단락: {prev_para_text}")
+                        print(f"현재 단락: {current_para_text}")
+                        print(f"다음 단락: {next_para_text}")
+                        print(f"이미지 크기: {len(image_data)} bytes")
+                        
+                        images.append({
+                            'paragraph_index': para_idx,
+                            'run_index': run_idx,
+                            'paragraph': para,
+                            'run': run,
+                            'image_data': image_data,
+                            'image_rid': embed
+                        })
+    return images
+
+
+def analyze_image_context(document, image_info, window_size=2):
+    """이미지 주변의 텍스트를 분석하여 이미지 설명을 찾습니다."""
+    para_idx = image_info['paragraph_index']
+    para = image_info['paragraph']
+    
+    # 이미지가 있는 단락의 전체 텍스트
+    current_para_text = para.text
+    
+    # 이전 단락들의 텍스트 (window_size개)
+    previous_paras = []
+    for i in range(max(0, para_idx - window_size), para_idx):
+        previous_paras.append(document.paragraphs[i].text)
+    
+    # 이후 단락들의 텍스트 (window_size개)
+    next_paras = []
+    for i in range(para_idx + 1, min(len(document.paragraphs), para_idx + window_size + 1)):
+        next_paras.append(document.paragraphs[i].text)
+    
+    # 이미지 설명 패턴 찾기
+    # 1. 대괄호로 둘러싸인 텍스트 찾기
+    bracket_pattern = r'\[(.*?)\]'
+    bracket_matches = re.finditer(bracket_pattern, current_para_text)
+    
+    # 2. 이미지 관련 키워드 찾기
+    image_keywords = ['그림', '사진', '이미지', 'QR', '코드', '차트', '표', '다이어그램']
+    
+    # 이미지 설명 후보들
+    candidates = []
+    
+    # 현재 단락에서 찾기
+    for match in bracket_matches:
+        text = match.group(1)
+        if any(keyword in text for keyword in image_keywords):
+            candidates.append({
+                'text': text,
+                'position': 'current',
+                'distance': abs(match.start() - image_info['run_index'])
+            })
+    
+    # 이전 단락들에서 찾기
+    for idx, prev_text in enumerate(previous_paras):
+        for match in re.finditer(bracket_pattern, prev_text):
+            text = match.group(1)
+            if any(keyword in text for keyword in image_keywords):
+                candidates.append({
+                    'text': text,
+                    'position': 'previous',
+                    'distance': len(previous_paras) - idx
+                })
+    
+    # 이후 단락들에서 찾기
+    for idx, next_text in enumerate(next_paras):
+        for match in re.finditer(bracket_pattern, next_text):
+            text = match.group(1)
+            if any(keyword in text for keyword in image_keywords):
+                candidates.append({
+                    'text': text,
+                    'position': 'next',
+                    'distance': idx + 1
+                })
+    
+    # 가장 적절한 설명 선택
+    if candidates:
+        # 거리와 위치를 고려하여 가장 적절한 설명 선택
+        best_candidate = min(candidates, key=lambda x: (x['distance'], 
+            0 if x['position'] == 'current' else 
+            1 if x['position'] == 'previous' else 2))
+        return best_candidate['text']
+    
+    return None
 
 
 def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=None, book_publisher=None, book_language="ko"):
@@ -138,68 +276,13 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     sent_counter = 2  # doctitle과 docauthor 이후부터 시작
     element_counter = 2  # doctitle과 docauthor 이후부터 시작
 
-    # 이미지 처리 개선
-    print("이미지 처리 중...")
-    # 이미지 저장 디렉토리 생성 - 루트 디렉토리에 직접 저장하므로 별도 디렉토리 생성 불필요
-    # images_dir = os.path.join(output_dir, "images")
-    # os.makedirs(images_dir, exist_ok=True)
-    
     # 이미지 관련 정보 저장 변수
     image_info = {}  # 이미지 번호 -> {제목, 설명, 위치} 매핑
     
-    # 이미지 패턴 개선 - [그림 N], [그림], [사진 N], [사진] 형식 모두 지원
-    image_pattern = re.compile(r'\[(?:그림|사진)(?:\s*(\d+))?\]\s*(.*?)$', re.IGNORECASE)
-    image_desc_start_pattern = re.compile(r'\[(?:그림|사진)\s*설명\]', re.IGNORECASE)
-    image_desc_end_pattern = re.compile(r'\[(?:그림|사진)\s*끝\]', re.IGNORECASE)
-    
-    current_image_num = None
-    collecting_desc = False
-    current_desc = []
-    
-    for para_idx, para in enumerate(document.paragraphs):
-        # 이미지 제목 패턴 찾기
-        match = image_pattern.search(para.text)
-        if match:
-            # 제목 추출 - [그림 N] 또는 [그림] 이후의 모든 텍스트
-            title_parts = para.text.split(']', 1)
-            img_title = title_parts[1].strip() if len(title_parts) > 1 else para.text.strip()
-            
-            # 이미지 타입 확인 (그림 또는 사진)
-            img_type = "그림" if "[그림" in para.text else "사진"
-            
-            # 이미지 번호가 없는 경우 자동으로 번호 할당
-            img_num = str(len(image_info) + 1)
-            print(f"이미지 번호 자동으로 번호 할당: {img_num}")
-            
-            image_info[img_num] = {
-                'title': img_title,
-                'position': para_idx,
-                'description': [],
-                'alt_text': f"{img_type} {img_num}: {img_title}",
-                'type': img_type  # 이미지 타입 저장
-            }
-            current_image_num = img_num
-            print(f"이미지 제목 발견: [{img_type} {img_num}] {img_title} (위치: {para_idx})")
-        
-        # 이미지 설명 시작 패턴 찾기
-        elif image_desc_start_pattern.search(para.text):
-            collecting_desc = True
-            current_desc = []
-            print("이미지 설명 시작")
-        
-        # 이미지 설명 끝 패턴 찾기
-        elif image_desc_end_pattern.search(para.text):
-            collecting_desc = False
-            if current_image_num and current_image_num in image_info:
-                # 동일한 설명이 중복 등록되지 않도록 처리
-                if current_desc:
-                    image_info[current_image_num]['description'] = current_desc
-            current_desc = []
-            print("이미지 설명 끝")
-        
-        # 설명 수집 중이라면 추가 (빈 문단은 제외)
-        elif collecting_desc and para.text.strip():
-            current_desc.append(para.text.strip())
+    # 1. 문서에서 모든 이미지 찾기
+    print("문서에서 이미지 찾는 중...")
+    images = find_all_images(document)
+    print(f"총 {len(images)}개의 이미지 발견")
     
     # 2. 문서에서 모든 이미지 추출
     print(f"문서에서 이미지 추출 중...")
@@ -221,51 +304,9 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     # 이미지 매핑 정보 초기화
     image_mapping = {}  # 이미지 번호 -> 이미지 관계 매핑
 
-    # 이미지 제목과 이미지 관계 매핑 시도
-    # 1. 먼저 이미지 제목이 있는 이미지 매핑
-    for img_num, info in image_info.items():
-        if int(img_num) <= len(image_relations):
-            image_mapping[img_num] = image_relations[int(img_num) - 1]
-            print(f"이미지 {img_num} 매핑: {info['title']}")
-
-    # 2. 매핑되지 않은 이미지 관계에 대해 자동 번호 할당
-    for i, rel in enumerate(image_relations):
-        img_num = str(i + 1)
-        if img_num not in image_mapping:
-            image_mapping[img_num] = rel
-            # 이미지 정보가 없는 경우 기본 정보 생성
-            if img_num not in image_info:
-                image_info[img_num] = {
-                    'title': f"이미지 {img_num}",
-                    'position': len(document.paragraphs),  # 기본값으로 문서 끝에 배치
-                    'description': [],
-                    'alt_text': f"이미지 {img_num}"
-                }
-                print(f"이미지 {img_num}에 대한 정보가 없어 기본 정보 생성")
-
-    # 3. 이미지 순서 정렬 - 이미지가 발견되는 순서대로 번호 부여
-    # 이미지 번호를 기준으로 정렬하는 대신 이미지 관계의 순서대로 처리
-    image_counter = 0
-    for i, rel in enumerate(image_relations):
-        # 이미지 관계의 인덱스를 기준으로 이미지 번호 할당
-        img_num = str(i + 1)
-        
-        # 이미지 매핑에서 해당 번호의 이미지 관계 가져오기
-        if img_num in image_mapping:
-            rel = image_mapping[img_num]
-        else:
-            # 매핑에 없는 경우 현재 이미지 관계 사용
-            rel = image_relations[i]
-            # 이미지 정보가 없는 경우 기본 정보 생성
-            if img_num not in image_info:
-                image_info[img_num] = {
-                    'title': f"이미지 {img_num}",
-                    'position': len(document.paragraphs),  # 기본값으로 문서 끝에 배치
-                    'description': [],
-                    'alt_text': f"이미지 {img_num}"
-                }
-                print(f"이미지 {img_num}에 대한 정보가 없어 기본 정보 생성")
-        
+    # 이미지 처리
+    for i, img in enumerate(images, 1):
+        img_num = str(i)
         try:
             image_counter += 1
             element_counter += 1
@@ -275,7 +316,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             elem_id = f"id_{element_counter}"
             sent_id = f"id_{sent_counter}"
             
-            # 이미지 파일 저장 - 원본 확장자 유지
+            # 이미지 파일 저장
             image_ext = os.path.splitext(rel.target_ref)[1]
             if not image_ext:  # 확장자가 없으면 기본값 사용
                 image_ext = ".jpeg"
@@ -283,45 +324,25 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             image_filename = f"image{img_num}{image_ext}"
             image_path = os.path.join(output_dir, image_filename)
             
-            # 이미지 데이터 추출 및 저장
-            image_data = rel.target_part.blob
+            # 이미지 데이터 저장
             with open(image_path, "wb") as img_file:
-                img_file.write(image_data)
+                img_file.write(img['image_data'])
             print(f"이미지 {img_num} 저장: {image_path}")
-            
-            # 이미지 관련 정보 찾기
-            alt_text = f"이미지 {img_num}"
-            img_position = len(document.paragraphs)  # 기본값으로 문서 끝에 배치
-            img_description = []
-            img_title = ""
-            
-            # 문서에서 추출한 이미지 정보가 있으면 사용
-            if img_num in image_info:
-                img_title = image_info[img_num]['title']
-                alt_text = f"그림 {img_num}: {img_title}"
-                img_position = image_info[img_num]['position'] + 1  # 이미지 제목 다음에 배치
-                img_description = image_info[img_num]['description']
-            
-            # 설명 정리
-            clean_desc = get_clean_description(img_description) if img_description else None
             
             # 이미지 정보를 content_structure에 추가
             content_structure.append({
                 "type": "image",
                 "src": image_filename,
-                "alt_text": alt_text,
-                "title": img_title,
+                "alt_text": f"이미지 {img_num}",
                 "id": elem_id,
                 "sent_id": sent_id,
                 "level": 0,
                 "markers": [],
                 "smil_file": "dtbook.smil",
-                "position": img_position,
-                "insert_before": False,
-                "description": clean_desc,
-                "image_number": int(img_num)  # 이미지 번호를 정수로 저장
+                "position": img['paragraph_index'],
+                "insert_before": False
             })
-            print(f"이미지 {img_num}를 content_structure에 추가함 (위치: {img_position})")
+            print(f"이미지 {img_num}를 content_structure에 추가함 (위치: {img['paragraph_index']})")
         except Exception as e:
             print(f"이미지 {img_num} 처리 중 오류 발생: {str(e)}")
     
@@ -639,19 +660,19 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                                     smilref=f"dtbook.smil#smil_par_{item['sent_id']}")
             
             # 이미지 제목만 캡션으로 설정
-            w = etree.SubElement(sent, "w")
+            # w = etree.SubElement(sent, "w")
             
             # 제목 설정
-            if "title" in item and item["title"]:
-                img_type = item.get("type", "그림")
-                w.text = f"{img_type} {item['id'].replace('id_', '')}: {item['title']}"
-            else:
-                w.text = item["alt_text"]
+            # if "title" in item and item["title"]:
+            #     img_type = item.get("type", "그림")
+            #     w.text = f"{img_type} {item['id'].replace('id_', '')}: {item['title']}"
+            # else:
+            #     w.text = item["alt_text"]
             
             # 이미지 설명이 있을 경우에만 추가
-            if "description" in item and item["description"]:
-                desc_p = etree.SubElement(caption, "p", class_="image-description")
-                desc_p.text = item["description"]
+            # if "description" in item and item["description"]:
+            #     desc_p = etree.SubElement(caption, "p", class_="image-description")
+            #     desc_p.text = item["description"]
             
             continue
         elif item["type"] == "table":
