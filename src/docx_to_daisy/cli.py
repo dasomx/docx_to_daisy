@@ -358,24 +358,12 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     # 표 위치 추적을 위한 변수
     table_positions = {}  # 표 인덱스 -> 단락 인덱스 매핑
     
-    # 표 관련 패턴 정의 - 더 엄격한 패턴 사용
-    table_pattern = re.compile(r'\[표(?:\s*\d+)?\]\s*(.*?)$', re.IGNORECASE)
-    
-    # 표 관련 문단들 수집 - 정확한 패턴 매칭 사용
-    table_titles = []  # 각 표 제목 정보 (인덱스, 텍스트)
-    for para_idx, para in enumerate(document.paragraphs):
-        match = table_pattern.search(para.text)
-        if match:  # '[표]' 패턴이 명확하게 있는 경우만 표 제목으로 인식
-            title_text = para.text.strip()
-            table_titles.append((para_idx, title_text))
-            print(f"표 제목 발견: '{title_text}' - 위치: {para_idx}")
-    
-    print(f"{len(table_titles)}개의 표 제목 발견")
-    
     # 단락 처리
     for para_idx, para in enumerate(document.paragraphs):
         text_raw = para.text  # 원본 텍스트(앞뒤 공백 유지)
         style_name = para.style.name.lower()  # 스타일 이름을 소문자로 비교
+
+        # 표 제목 패턴 체크 제거 - 모든 단락을 처리
 
         # <br/> 태그(또는 변형) 기준으로 세그먼트를 분리합니다.
         br_segments = re.split(r'<br\s*/?>', text_raw, flags=re.IGNORECASE)
@@ -390,8 +378,8 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                 blank_sent_id = f"id_{sent_counter}"
                 content_structure.append({
                     "type": "p",
-                    "text": "",  # 실제 내용이 없는 빈 문단
-                    "words": [],
+                    "text": "<br/>",  # br 태그가 포함된 문단
+                    "words": ["<br/>"],
                     "id": blank_elem_id,
                     "sent_id": blank_sent_id,
                     "level": 0,
@@ -428,9 +416,9 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                         "insert_before": True  # 단락 앞에 페이지 번호 삽입
                     })
 
-            # 마커만 있고 실제 내용이 없는 경우 건너뜀
-            if not processed_text.strip():
-                continue
+                    # 마커만 있고 실제 내용이 없는 경우 건너뜀
+                    if not processed_text.strip():
+                        continue
 
             element_counter += 1
             sent_counter += 1
@@ -471,9 +459,9 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     
     # 문서의 실제 표만 처리
     if len(document.tables) > 0:
-        print(f"문서에 {len(document.tables)}개의 표와 {len(table_titles)}개의 표 제목 발견")
+        print(f"문서에 {len(document.tables)}개의 표 발견")
         
-        # 각 표와 표 제목 매핑
+        # 각 표 처리
         for table_idx, table in enumerate(document.tables, 1):
             element_counter += 1
             sent_counter += 1
@@ -496,21 +484,55 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                     row_data.append(cell_text)
                     
                     # 셀 병합 정보 확인
-                    is_merged = False
+                    rowspan = 1
+                    colspan = 1
+                    is_merged_cell = False
+                    
                     if hasattr(cell, '_tc') and hasattr(cell._tc, 'vMerge'):
                         if cell._tc.vMerge == 'restart':
-                            is_merged = True
-                            print(f"    병합 시작 셀: ({row_idx}, {col_idx})")
+                            is_merged_cell = True
+                            # 세로 병합 계산: 연속된 'continue' 셀 개수 세기
+                            for next_row_idx in range(row_idx + 1, len(table.rows)):
+                                if col_idx < len(table.rows[next_row_idx].cells):
+                                    next_cell = table.rows[next_row_idx].cells[col_idx]
+                                    if (hasattr(next_cell, '_tc') and hasattr(next_cell._tc, 'vMerge') and 
+                                        next_cell._tc.vMerge == 'continue'):
+                                        rowspan += 1
+                                    else:
+                                        break
+                                else:
+                                    break
+                            print(f"    세로 병합 셀: ({row_idx}, {col_idx}) - rowspan={rowspan}")
                         elif cell._tc.vMerge == 'continue':
-                            is_merged = True
-                            print(f"    병합 연속 셀: ({row_idx}, {col_idx})")
+                            # 'continue' 셀은 건너뛰기 (이미 위에서 처리됨)
+                            continue
+                    
+                    # 가로 병합 확인
+                    if hasattr(cell, '_tc') and hasattr(cell._tc, 'hMerge'):
+                        if cell._tc.hMerge == 'restart':
+                            is_merged_cell = True
+                            # 가로 병합 계산: 연속된 'continue' 셀 개수 세기
+                            colspan = 1
+                            for next_col_idx in range(col_idx + 1, len(row.cells)):
+                                next_cell = row.cells[next_col_idx]
+                                if (hasattr(next_cell, '_tc') and hasattr(next_cell._tc, 'hMerge') and 
+                                    next_cell._tc.hMerge == 'continue'):
+                                    colspan += 1
+                                else:
+                                    break
+                            print(f"    가로 병합 셀: ({row_idx}, {col_idx}) - colspan={colspan}")
+                        elif cell._tc.hMerge == 'continue':
+                            # 'continue' 셀은 건너뛰기 (이미 위에서 처리됨)
+                            continue
                     
                     # 셀 정보 저장
                     table_data["cells"].append({
                         "row": row_idx,
                         "col": col_idx,
                         "text": cell_text,
-                        "is_merged": is_merged
+                        "is_merged": is_merged_cell,
+                        "rowspan": rowspan,
+                        "colspan": colspan
                     })
                 
                 table_data["rows"].append(row_data)
@@ -524,14 +546,25 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                         col_data.append(cell_text)
                 table_data["cols"].append(col_data)
             
-            # 표 위치: 문서 body 내 실제 순서 사용
-            table_position_body = element_index.get(id(table._element), len(document.paragraphs))
-            table_title = f"표 {table_idx}"
+            # 표의 실제 위치를 찾기 위해 문서의 모든 요소를 순회
+            table_position_body = len(document.paragraphs)  # 기본값
+            try:
+                # 문서 body의 모든 자식 요소를 순회하면서 표의 위치 찾기
+                body_element = document._element.body
+                all_elements = list(body_element.iterchildren())
+                
+                for idx, element in enumerate(all_elements):
+                    if element is table._element:
+                        table_position_body = idx
+                        break
+                        
+                print(f"표 {table_idx} 실제 위치: {table_position_body} (총 {len(all_elements)}개 요소 중)")
+                
+            except Exception as e:
+                print(f"표 위치 계산 중 오류: {e}")
+                table_position_body = len(document.paragraphs)
             
-            # 표 제목이 충분히 있는 경우 매핑
-            if table_idx <= len(table_titles):
-                _, title_text = table_titles[table_idx - 1]
-                table_title = title_text
+            table_title = f"표 {table_idx}"
             
             # 표 정보를 content_structure에 추가
             content_structure.append({
@@ -545,7 +578,8 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                 "position": table_position_body,  # 문서 내 실제 위치
                 "insert_before": False,
                 "title": table_title,
-                "table_number": table_idx  # 표 번호 저장
+                "table_number": table_idx,  # 표 번호 저장
+                "text": table_title  # text 키 추가
             })
             
             print(f"표 {table_idx} 처리 완료: {len(table_data['rows'])}행 x {len(table_data['cols'])}열, 위치: {table_position_body}")
@@ -724,7 +758,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                                                 smilref=f"dtbook.smil#smil_par_{item['id']}")
                 current_level = 1
                 heading = etree.SubElement(current_level1, "h1")
-                heading.text = " ".join(item["words"])
+                heading.text = "제목 없음"
             
             # 표 요소 생성
             table = etree.SubElement(current_level1, "table", 
@@ -736,19 +770,8 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             # 표 데이터 가져오기
             table_data = item["table_data"]
             
-            # 표 제목 찾기
-            table_title_text = None
-            
-            # 저장된 제목 확인
-            if "title" in item and item["title"]:
-                title_match = re.search(r'\[표(?:\s*\d+)?\]\s*(.*?)$', item["title"])
-                if title_match and title_match.group(1):
-                    table_title_text = title_match.group(1).strip()
-                else:
-                    table_title_text = item["title"].strip()
-            
             # 표 번호 가져오기
-            table_number = item.get("table_number", table_idx)
+            table_number = item.get("table_number", 1)  # 기본값 1로 설정
             
             # tbody 요소 생성
             tbody = etree.SubElement(table, "tbody")
@@ -764,6 +787,10 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                     cell_info = next((cell for cell in table_data["cells"] 
                                     if cell["row"] == row_idx and cell["col"] == col_idx), None)
                     
+                    # 병합된 셀의 경우 건너뛰기 (이미 처리됨)
+                    if cell_info and cell_info["is_merged"] and (cell_info["rowspan"] > 1 or cell_info["colspan"] > 1):
+                        continue
+                    
                     # 셀 요소 생성
                     if col_idx == 0:
                         cell_elem = etree.SubElement(tr, "th", scope="row",
@@ -774,6 +801,13 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                                                     id=f"forsmil-{element_counter+row_idx*10+col_idx}",
                                                     smilref=f"dtbook.smil#smil_par_{item['id']}_cell_{row_idx}_{col_idx}")
                     
+                    # 병합 속성 설정
+                    if cell_info:
+                        if cell_info["rowspan"] > 1:
+                            cell_elem.set("rowspan", str(cell_info["rowspan"]))
+                        if cell_info["colspan"] > 1:
+                            cell_elem.set("colspan", str(cell_info["colspan"]))
+                    
                     # 셀 내용 추가: sent/w 태그 없이 <p> 바로 텍스트를 넣음
                     p = etree.SubElement(
                         cell_elem,
@@ -781,33 +815,11 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                         id=f"table_{item['id']}_cell_{row_idx}_{col_idx}",
                         smilref=f"dtbook.smil#smil_par_{item['id']}_cell_{row_idx}_{col_idx}"
                     )
-                    p.text = cell_text.strip()
-                    
-                    # 병합된 셀 처리
-                    if cell_info and cell_info["is_merged"]:
-                        try:
-                            is_row_merged = False
-                            is_col_merged = False
-                            
-                            current_cell = None
-                            try:
-                                if row_idx < len(table.rows) and col_idx < len(table.rows[row_idx].cells):
-                                    current_cell = table.rows[row_idx].cells[col_idx]
-                            except:
-                                pass
-                            
-                            if current_cell:
-                                if hasattr(current_cell, '_tc') and hasattr(current_cell._tc, 'vMerge'):
-                                    if current_cell._tc.vMerge == 'restart':
-                                        is_row_merged = True
-                                        cell_elem.set("rowspan", "2")
-                                
-                                if hasattr(current_cell, '_tc') and hasattr(current_cell._tc, 'hMerge'):
-                                    if current_cell._tc.hMerge == 'restart':
-                                        is_col_merged = True
-                                        cell_elem.set("colspan", "2")
-                        except Exception as e:
-                            print(f"병합 셀 처리 중 오류 발생: {str(e)}")
+                    # br 태그가 포함된 경우 실제 br 요소 생성
+                    if item.get("text", "") == "<br/>":
+                        br_elem = etree.SubElement(p, "br")
+                    else:
+                        p.text = cell_text.strip()
         elif item["type"].startswith("h"):
             level = int(item["type"][1])  # h1 -> 1, h2 -> 2, h3 -> 3, h4 -> 4, h5 -> 5, h6 -> 6
 
