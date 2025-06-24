@@ -253,11 +253,10 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     if book_author is None or not isinstance(book_author, str) or len(book_author.strip()) == 0:
         raise ValueError("저자 정보가 제공되지 않았거나 유효하지 않습니다. 변환을 진행할 수 없습니다.")
     
-    # book_publisher = "출판사"
 
     book_title = str(book_title)
     book_author = str(book_author)
-    # book_publisher = str(book_publisher)
+    book_publisher = str(book_publisher)
 
 
     # book_uid에 책 제목을 포함시켜 DAISY 열 때 표시될 이름 설정
@@ -279,6 +278,10 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     # 이미지 관련 정보 저장 변수
     image_info = {}  # 이미지 번호 -> {제목, 설명, 위치} 매핑
     
+    # 0. 문서 body child 순서를 맵으로 생성하여 실제 위치 사용
+    body_children = list(document._element.body.iterchildren())
+    element_index = {id(child): idx for idx, child in enumerate(body_children)}
+
     # 1. 문서에서 모든 이미지 찾기
     print("문서에서 이미지 찾는 중...")
     images = find_all_images(document)
@@ -330,6 +333,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             print(f"이미지 {img_num} 저장: {image_path}")
             
             # 이미지 정보를 content_structure에 추가
+            para_position = element_index.get(id(img['paragraph']._element), img['paragraph_index'])
             content_structure.append({
                 "type": "image",
                 "src": image_filename,
@@ -339,10 +343,10 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                 "level": 0,
                 "markers": [],
                 "smil_file": "dtbook.smil",
-                "position": img['paragraph_index'],
+                "position": para_position,
                 "insert_before": False
             })
-            print(f"이미지 {img_num}를 content_structure에 추가함 (위치: {img['paragraph_index']})")
+            print(f"이미지 {img_num}를 content_structure에 추가함 (위치: {para_position})")
         except Exception as e:
             print(f"이미지 {img_num} 처리 중 오류 발생: {str(e)}")
     
@@ -370,69 +374,98 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     
     # 단락 처리
     for para_idx, para in enumerate(document.paragraphs):
-        text = para.text.strip()
-
-        # 마커 처리
-        processed_text, markers = MarkerProcessor.process_text(text)
-
-        # 페이지 마커가 있는 경우 별도의 요소로 추가
-        for marker in markers:
-            if marker.type == "page":
-                element_counter += 1
-                sent_counter += 1
-                elem_id = f"id_{element_counter}"
-                sent_id = f"id_{sent_counter}"
-                content_structure.append({
-                    "type": "pagenum",
-                    "text": marker.value,
-                    "words": [marker.value],
-                    "id": elem_id,
-                    "sent_id": sent_id,
-                    "level": 0,
-                    "markers": [marker],
-                    "smil_file": "dtbook.smil",
-                    "position": para_idx,
-                    "insert_before": True  # 단락 앞에 페이지 번호 삽입
-                })
-
-        if not processed_text.strip():  # 마커만 있고 실제 내용이 없는 경우 건너뜀
-            continue
-
-        element_counter += 1
-        sent_counter += 1
-        elem_id = f"id_{element_counter}"
-        sent_id = f"id_{sent_counter}"
+        text_raw = para.text  # 원본 텍스트(앞뒤 공백 유지)
         style_name = para.style.name.lower()  # 스타일 이름을 소문자로 비교
 
-        # 단어 분리
-        words = split_text_to_words(processed_text)
+        # <br/> 태그(또는 변형) 기준으로 세그먼트를 분리합니다.
+        br_segments = re.split(r'<br\s*/?>', text_raw, flags=re.IGNORECASE)
 
-        # 스타일 이름에 따른 구조 매핑
-        content_structure.append({
-            "type": "h1" if style_name.startswith('heading 1') or style_name == '제목 1' else
-            "h2" if style_name.startswith('heading 2') or style_name == '제목 2' else
-            "h3" if style_name.startswith('heading 3') or style_name == '제목 3' else
-            "h4" if style_name.startswith('heading 4') or style_name == '제목 4' else
-            "h5" if style_name.startswith('heading 5') or style_name == '제목 5' else
-            "h6" if style_name.startswith('heading 6') or style_name == '제목 6' else
-            "p",
-            "text": processed_text,
-            "words": words,
-            "id": elem_id,
-            "sent_id": sent_id,
-            "level": 1 if style_name.startswith('heading 1') or style_name == '제목 1' else
-                    2 if style_name.startswith('heading 2') or style_name == '제목 2' else
-                    3 if style_name.startswith('heading 3') or style_name == '제목 3' else
-                    4 if style_name.startswith('heading 4') or style_name == '제목 4' else
-                    5 if style_name.startswith('heading 5') or style_name == '제목 5' else
-                    6 if style_name.startswith('heading 6') or style_name == '제목 6' else
-                    0,
-            "markers": markers,
-            "smil_file": "dtbook.smil",
-            "position": para_idx,
-            "insert_before": False  # 일반 텍스트는 순서대로 삽입
-        })
-    
+        # 세그먼트별 처리
+        for seg_idx, seg_text in enumerate(br_segments):
+            # <br/> 태그가 있었던 자리에 빈 문단을 생성합니다.
+            if seg_idx > 0:
+                element_counter += 1
+                sent_counter += 1
+                blank_elem_id = f"id_{element_counter}"
+                blank_sent_id = f"id_{sent_counter}"
+                content_structure.append({
+                    "type": "p",
+                    "text": "",  # 실제 내용이 없는 빈 문단
+                    "words": [],
+                    "id": blank_elem_id,
+                    "sent_id": blank_sent_id,
+                    "level": 0,
+                    "markers": [],
+                    "smil_file": "dtbook.smil",
+                    "position": para_idx,
+                    "insert_before": False
+                })
+
+            # 세그먼트 자체가 비어 있으면(공백만) 넘어갑니다.
+            if not seg_text.strip():
+                continue
+
+            # 마커 처리
+            processed_text, markers = MarkerProcessor.process_text(seg_text.strip())
+
+            # 페이지 마커가 있는 경우 먼저 처리
+            for marker in markers:
+                if marker.type == "page":
+                    element_counter += 1
+                    sent_counter += 1
+                    elem_id = f"id_{element_counter}"
+                    sent_id = f"id_{sent_counter}"
+                    content_structure.append({
+                        "type": "pagenum",
+                        "text": marker.value,
+                        "words": [marker.value],
+                        "id": elem_id,
+                        "sent_id": sent_id,
+                        "level": 0,
+                        "markers": [marker],
+                        "smil_file": "dtbook.smil",
+                        "position": para_idx,
+                        "insert_before": True  # 단락 앞에 페이지 번호 삽입
+                    })
+
+            # 마커만 있고 실제 내용이 없는 경우 건너뜀
+            if not processed_text.strip():
+                continue
+
+            element_counter += 1
+            sent_counter += 1
+            elem_id = f"id_{element_counter}"
+            sent_id = f"id_{sent_counter}"
+
+            # 단어 분리
+            words = split_text_to_words(processed_text)
+
+            # 스타일 이름에 따른 구조 매핑
+            content_structure.append({
+                "type": "h1" if style_name.startswith('heading 1') or style_name == '제목 1' else
+                "h2" if style_name.startswith('heading 2') or style_name == '제목 2' else
+                "h3" if style_name.startswith('heading 3') or style_name == '제목 3' else
+                "h4" if style_name.startswith('heading 4') or style_name == '제목 4' else
+                "h5" if style_name.startswith('heading 5') or style_name == '제목 5' else
+                "h6" if style_name.startswith('heading 6') or style_name == '제목 6' else
+                "p",
+                "text": processed_text,
+                "words": words,
+                "id": elem_id,
+                "sent_id": sent_id,
+                "level": 1 if style_name.startswith('heading 1') or style_name == '제목 1' else
+                        2 if style_name.startswith('heading 2') or style_name == '제목 2' else
+                        3 if style_name.startswith('heading 3') or style_name == '제목 3' else
+                        4 if style_name.startswith('heading 4') or style_name == '제목 4' else
+                        5 if style_name.startswith('heading 5') or style_name == '제목 5' else
+                        6 if style_name.startswith('heading 6') or style_name == '제목 6' else
+                        0,
+                "markers": markers,
+                "smil_file": "dtbook.smil",
+                "position": para_idx,
+                "insert_before": False  # 일반 텍스트는 순서대로 삽입
+            })
+
     # 표 처리 추가
     print("표 처리 중...")
     
@@ -491,16 +524,14 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                         col_data.append(cell_text)
                 table_data["cols"].append(col_data)
             
-            # 표 위치와 제목 결정
-            table_position = len(document.paragraphs)  # 기본값으로 문서 끝에 배치
+            # 표 위치: 문서 body 내 실제 순서 사용
+            table_position_body = element_index.get(id(table._element), len(document.paragraphs))
             table_title = f"표 {table_idx}"
             
             # 표 제목이 충분히 있는 경우 매핑
             if table_idx <= len(table_titles):
-                para_idx, title_text = table_titles[table_idx - 1]
-                table_position = para_idx + 1  # 표 제목 바로 다음에 배치
+                _, title_text = table_titles[table_idx - 1]
                 table_title = title_text
-                print(f"표 {table_idx}에 '{table_title}' 제목 매핑됨")
             
             # 표 정보를 content_structure에 추가
             content_structure.append({
@@ -511,13 +542,13 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                 "level": 0,
                 "markers": [],
                 "smil_file": "dtbook.smil",
-                "position": table_position,  # 표의 실제 위치 사용
+                "position": table_position_body,  # 문서 내 실제 위치
                 "insert_before": False,
                 "title": table_title,
                 "table_number": table_idx  # 표 번호 저장
             })
             
-            print(f"표 {table_idx} 처리 완료: {len(table_data['rows'])}행 x {len(table_data['cols'])}열, 위치: {table_position}")
+            print(f"표 {table_idx} 처리 완료: {len(table_data['rows'])}행 x {len(table_data['cols'])}열, 위치: {table_position_body}")
     else:
         print("문서에 표가 없습니다.")
 
@@ -570,6 +601,9 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     meta_author = etree.SubElement(head, "meta",
                                    name="dc:Creator",
                                    content=book_author)
+    meta_publisher = etree.SubElement(head, "meta",
+                                   name="dc:Publisher",
+                                   content=book_publisher)
     meta_language = etree.SubElement(head, "meta",
                                      name="dc:Language",
                                      content=book_language)
@@ -601,6 +635,12 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                                  id="forsmil-2",
                                  smilref="dtbook.smil#sforsmil-2")
     docauthor.text = book_author
+
+    # 출판사 추가
+    docpublisher = etree.SubElement(dtbook_frontmatter, "docpublisher",
+                                    id="forsmil-3",
+                                    smilref="dtbook.smil#sforsmil-3")
+    docpublisher.text = book_publisher
 
     # bodymatter 추가
     dtbook_bodymatter = etree.SubElement(dtbook_book, "bodymatter")
@@ -734,21 +774,14 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                                                     id=f"forsmil-{element_counter+row_idx*10+col_idx}",
                                                     smilref=f"dtbook.smil#smil_par_{item['id']}_cell_{row_idx}_{col_idx}")
                     
-                    # 셀 내용 추가
-                    p = etree.SubElement(cell_elem, "p",
-                                        id=f"forsmil-{element_counter+row_idx*10+col_idx+1}",
-                                        smilref=f"dtbook.smil#smil_par_{item['id']}_cell_{row_idx}_{col_idx}")
-                    
-                    # 단어 분리 및 추가
-                    words = split_text_to_words(cell_text)
-                    sent = etree.SubElement(p, "sent",
-                                           id=f"id_{sent_counter}",
-                                           smilref=f"dtbook.smil#smil_par_{item['id']}_cell_{row_idx}_{col_idx}")
-                    sent_counter += 1
-                    
-                    for word in words:
-                        w = etree.SubElement(sent, "w")
-                        w.text = word
+                    # 셀 내용 추가: sent/w 태그 없이 <p> 바로 텍스트를 넣음
+                    p = etree.SubElement(
+                        cell_elem,
+                        "p",
+                        id=f"table_{item['id']}_cell_{row_idx}_{col_idx}",
+                        smilref=f"dtbook.smil#smil_par_{item['id']}_cell_{row_idx}_{col_idx}"
+                    )
+                    p.text = cell_text.strip()
                     
                     # 병합된 셀 처리
                     if cell_info and cell_info["is_merged"]:
