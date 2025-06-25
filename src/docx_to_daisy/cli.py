@@ -8,6 +8,7 @@ from docx import Document  # python-docx 라이브러리
 from lxml import etree  # lxml 라이브러리
 from datetime import datetime
 from .markers import MarkerProcessor  # 마커 처리기 임포트
+import gc
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
@@ -319,10 +320,18 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             elem_id = f"id_{element_counter}"
             sent_id = f"id_{sent_counter}"
             
-            # 이미지 파일 저장
-            image_ext = os.path.splitext(rel.target_ref)[1]
-            if not image_ext:  # 확장자가 없으면 기본값 사용
-                image_ext = ".jpeg"
+            # 이미지 파일 저장 - img에서 직접 이미지 데이터 사용
+            image_ext = ".jpeg"  # 기본 확장자
+            # 이미지 관계에서 확장자 추출 시도
+            try:
+                if 'image_rid' in img:
+                    rel = document.part.rels[img['image_rid']]
+                    if hasattr(rel, 'target_ref'):
+                        ext = os.path.splitext(rel.target_ref)[1]
+                        if ext:
+                            image_ext = ext
+            except:
+                pass  # 확장자 추출 실패 시 기본값 사용
             
             image_filename = f"image{img_num}{image_ext}"
             image_path = os.path.join(output_dir, image_filename)
@@ -349,17 +358,29 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             print(f"이미지 {img_num}를 content_structure에 추가함 (위치: {para_position})")
         except Exception as e:
             print(f"이미지 {img_num} 처리 중 오류 발생: {str(e)}")
+            continue  # 오류 발생 시 다음 이미지로 진행
     
     print(f"{image_counter}개 이미지 추출 완료.")
 
+    # 메모리 정리
+    del images
+    del image_relations
+    del image_mapping
+    gc.collect()
+
     # DOCX의 단락(paragraph)을 순회하며 구조 파악
     print("DOCX 파일 분석 중...")
+    print(f"총 {len(document.paragraphs)}개의 단락을 처리합니다.")
     
     # 표 위치 추적을 위한 변수
     table_positions = {}  # 표 인덱스 -> 단락 인덱스 매핑
     
     # 단락 처리
     for para_idx, para in enumerate(document.paragraphs):
+        # 진행 상황 로그 (100개 단락마다)
+        if para_idx % 100 == 0:
+            print(f"단락 처리 진행 중: {para_idx}/{len(document.paragraphs)} ({para_idx/len(document.paragraphs)*100:.1f}%)")
+        
         text_raw = para.text  # 원본 텍스트(앞뒤 공백 유지)
         style_name = para.style.name.lower()  # 스타일 이름을 소문자로 비교
 
@@ -453,6 +474,8 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                 "position": para_idx,
                 "insert_before": False  # 일반 텍스트는 순서대로 삽입
             })
+    
+    print(f"단락 처리 완료: 총 {len(content_structure)}개의 구조 요소 생성")
 
     # 표 처리 추가
     print("표 처리 중...")
@@ -463,6 +486,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
         
         # 각 표 처리
         for table_idx, table in enumerate(document.tables, 1):
+            print(f"표 {table_idx} 처리 중...")
             element_counter += 1
             sent_counter += 1
             elem_id = f"id_{element_counter}"
@@ -549,20 +573,48 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             # 표의 실제 위치를 찾기 위해 문서의 모든 요소를 순회
             table_position_body = len(document.paragraphs)  # 기본값
             try:
-                # 문서 body의 모든 자식 요소를 순회하면서 표의 위치 찾기
+                # 문서 body의 모든 자식 요소를 순회하면서 표의 정확한 위치 찾기
                 body_element = document._element.body
                 all_elements = list(body_element.iterchildren())
                 
+                # 표가 있는 위치를 찾기
+                table_element_index = -1
                 for idx, element in enumerate(all_elements):
                     if element is table._element:
-                        table_position_body = idx
+                        table_element_index = idx
                         break
-                        
-                print(f"표 {table_idx} 실제 위치: {table_position_body} (총 {len(all_elements)}개 요소 중)")
+                
+                if table_element_index != -1:
+                    # 표 이전의 단락 개수를 세어서 표 위치 결정
+                    paragraph_count_before_table = 0
+                    for idx in range(table_element_index):
+                        element = all_elements[idx]
+                        # 단락 요소인지 확인
+                        if element.tag.endswith('p'):
+                            paragraph_count_before_table += 1
+                    
+                    table_position_body = paragraph_count_before_table
+                    print(f"표 {table_idx} 정확한 위치 발견: {table_position_body} (표 이전 단락 수: {paragraph_count_before_table})")
+                else:
+                    # 표를 찾지 못한 경우, 표 제목 패턴으로 위치 찾기
+                    for para_idx, para in enumerate(document.paragraphs):
+                        para_text = para.text.strip()
+                        # 표 제목 패턴 확인 (예: [표 3.1], 표 3.1 등)
+                        if re.search(r'\[?표\s*\d+\.?\d*\]?', para_text, re.IGNORECASE):
+                            table_position_body = para_idx + 0.5  # 표 제목 다음에 표가 위치
+                            print(f"표 {table_idx} 제목 패턴 위치 발견: {para_idx + 0.5}")
+                            break
+                    
+                    # 여전히 찾지 못한 경우 마지막 단락 위치 사용
+                    if table_position_body == len(document.paragraphs):
+                        table_position_body = len(document.paragraphs) - 1
+                        print(f"표 {table_idx} 마지막 위치 사용: {table_position_body}")
+                
+                print(f"표 {table_idx} 최종 위치: {table_position_body} (총 {len(document.paragraphs)}개 단락 중)")
                 
             except Exception as e:
                 print(f"표 위치 계산 중 오류: {e}")
-                table_position_body = len(document.paragraphs)
+                table_position_body = len(document.paragraphs) - 1
             
             table_title = f"표 {table_idx}"
             
@@ -585,6 +637,10 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             print(f"표 {table_idx} 처리 완료: {len(table_data['rows'])}행 x {len(table_data['cols'])}열, 위치: {table_position_body}")
     else:
         print("문서에 표가 없습니다.")
+
+    # 메모리 정리
+    del table_positions
+    gc.collect()
 
     # 콘텐츠를 위치에 따라 정렬
     content_structure.sort(key=lambda x: (x["position"], 
