@@ -3051,8 +3051,7 @@ a[href^="http"] {
     border-bottom: 1px dotted #0066cc;
 }
 
-/* MathML 스타일 (G81 지침) */
-}'''
+'''
     
     with open(os.path.join(oebps_dir, "style.css"), "w", encoding="utf-8") as f:
         f.write(css_content)
