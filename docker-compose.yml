@@ -1,4 +1,4 @@
-version: '3'
+version: '3.8'
 
 services:
   # Redis 서비스
@@ -11,9 +11,21 @@ services:
     restart: always
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
+      interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 3
+      start_period: 30s
+    command: >
+      redis-server 
+      --maxmemory 1gb 
+      --maxmemory-policy allkeys-lru
+      --timeout 0
+      --tcp-keepalive 300
+      --save 900 1
+      --save 300 10
+      --save 60 10000
+      --appendonly yes
+      --appendfsync everysec
 
   # API 서버
   api:
@@ -34,8 +46,14 @@ services:
     command: ["docx-to-daisy-api", "--host", "0.0.0.0", "--port", "8000"]
     volumes:
       - temp_data:/tmp
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 512M
 
-  # 작업 처리 워커
+  # 작업 처리 워커 (메인)
   worker:
     build:
       context: .
@@ -49,7 +67,34 @@ services:
       redis:
         condition: service_healthy
     restart: always
-    command: ["docx-to-daisy-worker", "--workers", "4"]
+    command: ["docx-to-daisy-worker"]
+    volumes:
+      - temp_data:/tmp
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2.0'
+        reservations:
+          memory: 1G
+          cpus: '1.0'
+
+  # 모니터링 서비스 (선택사항)
+  monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - QUEUE_NAME=daisy_queue
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: always
+    command: ["python", "-c", "import time; from rq import Queue; from redis import Redis; import os; redis_conn = Redis(host=os.environ.get('REDIS_HOST'), port=int(os.environ.get('REDIS_PORT')), db=int(os.environ.get('REDIS_DB'))); queue = Queue(os.environ.get('QUEUE_NAME'), connection=redis_conn); print(f'큐 상태: {len(queue)}개 작업 대기 중'); time.sleep(30)"]
     volumes:
       - temp_data:/tmp
 
