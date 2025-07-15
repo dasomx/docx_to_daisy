@@ -4,6 +4,7 @@ import uuid
 import argparse
 import re
 import logging
+import html
 from docx import Document  # python-docx 라이브러리
 from lxml import etree  # lxml 라이브러리
 from datetime import datetime
@@ -13,6 +14,37 @@ import gc
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def html_escape(text):
+    """HTML 특수 문자를 이스케이프하고 HTML 태그를 제거하는 함수
+    
+    Args:
+        text (str): 이스케이프할 텍스트
+        
+    Returns:
+        str: 이스케이프된 텍스트 (HTML 태그 제거됨)
+    """
+    if not isinstance(text, str):
+        return str(text)
+
+    # HTML 태그 제거
+    import re
+    # HTML 태그 패턴 (시작 태그, 종료 태그, 자체 종료 태그 모두 포함)
+    html_tag_pattern = r'<[^>]*>'
+    cleaned_text = re.sub(html_tag_pattern, '', text)
+
+    # HTML 특수 문자 이스케이프
+    escaped = html.escape(cleaned_text, quote=True)
+
+    # 추가적인 이스케이프 처리
+    escaped = escaped.replace('&amp;', '&amp;')  # 이미 이스케이프된 &는 유지
+    escaped = escaped.replace('&lt;', '&lt;')    # 이미 이스케이프된 <는 유지
+    escaped = escaped.replace('&gt;', '&gt;')    # 이미 이스케이프된 >는 유지
+    escaped = escaped.replace('&quot;', '&quot;')  # 이미 이스케이프된 "는 유지
+    escaped = escaped.replace('&#x27;', '&#x27;')  # 이미 이스케이프된 '는 유지
+
+    return escaped
 
 
 def split_text_to_words(text):
@@ -1571,7 +1603,7 @@ def zip_daisy_output(source_dir, output_zip_filename):
         print(f"ZIP 파일 생성 중 오류 발생: {e}")
 
 
-def create_epub3_book(docx_file_path, output_dir, book_title=None, book_author=None, book_publisher=None, book_language="ko"):
+def create_epub3_book(docx_file_path, output_dir, book_title=None, book_author=None, book_publisher=None, book_language="ko", book_isbn="NOT_GIVEN_ISBN"):
     """DOCX 파일을 EPUB3 형식으로 변환합니다 (TTAK.KO-10.0905 표준 준수).
 
     Args:
@@ -1609,6 +1641,7 @@ def create_epub3_book(docx_file_path, output_dir, book_title=None, book_author=N
     book_title = str(book_title)
     book_author = str(book_author)
     book_publisher = str(book_publisher) if book_publisher else "Unknown Publisher"
+    book_isbn = str(book_isbn) if book_isbn else "Unkown ISBN"
     
     # EPUB3 UID 생성
     epub_uid = f"urn:uuid:{uuid.uuid4()}"
@@ -2032,16 +2065,16 @@ def create_epub3_book(docx_file_path, output_dir, book_title=None, book_author=N
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="{book_language}" xml:lang="{book_language}">
 <head>
     <meta charset="UTF-8"/>
-    <title>{book_title}</title>
+    <title>{html_escape(book_title)}</title>
     <link rel="stylesheet" type="text/css" href="style.css"/>
     <!-- 반응형 레이아웃 메타데이터 (G70, G71, G72 지침 준수) -->
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=3.0, user-scalable=yes"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes"/>
 </head>
 <body>
-    <section epub:type="titlepage" role="doc-titlepage">
-        <h1 class="book-title">{book_title}</h1>
-        <p class="book-author">{book_author}</p>
-        <p class="book-publisher">{book_publisher}</p>
+    <section epub:type="titlepage" role="doc-abstract">
+        <h1 class="book-title">{html_escape(book_title)}</h1>
+        <p class="book-author">{html_escape(book_author)}</p>
+        <p class="book-publisher">{html_escape(book_publisher)}</p>
     </section>
 </body>
 </html>'''
@@ -2060,14 +2093,14 @@ def create_epub3_book(docx_file_path, output_dir, book_title=None, book_author=N
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="{book_language}" xml:lang="{book_language}">
 <head>
     <meta charset="UTF-8"/>
-    <title>{book_title}</title>
+    <title>{html_escape(book_title)}</title>
     <link rel="stylesheet" type="text/css" href="style.css"/>
     <!-- 반응형 레이아웃 메타데이터 (G70, G71, G72 지침 준수) -->
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=3.0, user-scalable=yes"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes"/>
 </head>
 <body>
     <!-- 본문 시작 (G12, G13 지침 준수) -->
-    <section epub:type="bodymatter" role="doc-body">'''
+    <section epub:type="bodymatter" role="doc-chapter">'''
     
     # 콘텐츠 구조 분석을 위한 변수들
     current_section_level = 0
@@ -2094,7 +2127,7 @@ def create_epub3_book(docx_file_path, output_dir, book_title=None, book_author=N
                 in_unordered_list = False
                 list_items = []
             
-            content_html += f'\n        <span epub:type="pagebreak" role="doc-pagebreak" id="{item["id"]}">{item["text"]}</span>'
+            content_html += f'\n        <span epub:type="pagebreak" role="doc-pagebreak" id="{item["id"]}">{html_escape(item["text"])}</span>'
         elif item["type"] == "image":
             # 목록이 열려있으면 먼저 닫기
             if in_ordered_list:
@@ -2107,8 +2140,8 @@ def create_epub3_book(docx_file_path, output_dir, book_title=None, book_author=N
                 list_items = []
             
             content_html += f'\n        <figure id="{item["id"]}">'
-            content_html += f'\n            <img src="{item["src"]}" alt="{item["alt_text"]}" role="img"/>'
-            content_html += f'\n            <figcaption>{item["alt_text"]}</figcaption>'
+            content_html += f'\n            <img src="{item["src"]}" alt="{html_escape(item["alt_text"])}" role="img"/>'
+            content_html += f'\n            <figcaption>{html_escape(item["alt_text"])}</figcaption>'
             content_html += f'\n        </figure>'
         elif item["type"] == "table":
             # 목록이 열려있으면 먼저 닫기
@@ -2122,7 +2155,7 @@ def create_epub3_book(docx_file_path, output_dir, book_title=None, book_author=N
                 list_items = []
             
             content_html += f'\n        <table id="{item["id"]}">'
-            content_html += f'\n            <caption>{item["title"]}</caption>'
+            content_html += f'\n            <caption>{html_escape(item["title"])}</caption>'
             table_data = item["table_data"]
             
             # 표 헤더 (G34, G35, G36 지침 준수)
@@ -2130,7 +2163,7 @@ def create_epub3_book(docx_file_path, output_dir, book_title=None, book_author=N
                 content_html += '\n            <thead>'
                 content_html += '\n                <tr>'
                 for col_idx, cell_text in enumerate(table_data["rows"][0]):
-                    content_html += f'\n                    <th scope="col">{cell_text}</th>'
+                    content_html += f'\n                    <th scope="col">{html_escape(cell_text)}</th>'
                 content_html += '\n                </tr>'
                 content_html += '\n            </thead>'
             
@@ -2140,9 +2173,9 @@ def create_epub3_book(docx_file_path, output_dir, book_title=None, book_author=N
                 content_html += '\n                <tr>'
                 for col_idx, cell_text in enumerate(row_data):
                     if col_idx == 0:
-                        content_html += f'\n                    <th scope="row">{cell_text}</th>'
+                        content_html += f'\n                    <th scope="row">{html_escape(cell_text)}</th>'
                     else:
-                        content_html += f'\n                    <td>{cell_text}</td>'
+                        content_html += f'\n                    <td>{html_escape(cell_text)}</td>'
                 content_html += '\n                </tr>'
             content_html += '\n            </tbody>'
             content_html += '\n        </table>'
@@ -2182,7 +2215,7 @@ def create_epub3_book(docx_file_path, output_dir, book_title=None, book_author=N
             
             current_section_level = level
             
-            content_html += f'\n        <h{level} id="{item["id"]}">{item["text"]}</h{level}>'
+            content_html += f'\n        <h{level} id="{item["id"]}">{html_escape(item["text"])}</h{level}>'
         else:
             # 일반 단락
             if item.get("text", "") == "<br/>":
@@ -2199,7 +2232,7 @@ def create_epub3_book(docx_file_path, output_dir, book_title=None, book_author=N
                 content_html += f'\n        <p id="{item["id"]}"><br/></p>'
             else:
                 # 텍스트 전처리 (G18, G26, G28, G29, G30 지침 준수)
-                processed_text = item["text"]
+                processed_text = html_escape(item["text"])
                 
                 # 강세 처리 (G18 지침) - 볼드/이탤릭을 em/strong으로 변환
                 processed_text = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', processed_text)
@@ -2223,7 +2256,7 @@ def create_epub3_book(docx_file_path, output_dir, book_title=None, book_author=N
                     
                     # 목록 항목 추가
                     list_item_text = re.sub(r'^\d+\.\s', '', processed_text)
-                    content_html += f'\n            <li>{list_item_text}</li>'
+                    content_html += f'\n            <li>{html_escape(list_item_text)}</li>'
                     continue
                 elif re.match(r'^[-•*]\s', processed_text):
                     # 글머리 기호 목록
@@ -2239,7 +2272,7 @@ def create_epub3_book(docx_file_path, output_dir, book_title=None, book_author=N
                     
                     # 목록 항목 추가
                     list_item_text = processed_text[2:]
-                    content_html += f'\n            <li>{list_item_text}</li>'
+                    content_html += f'\n            <li>{html_escape(list_item_text)}</li>'
                     continue
                 else:
                     # 목록이 열려있으면 닫기
@@ -2358,7 +2391,7 @@ def create_epub3_book(docx_file_path, output_dir, book_title=None, book_author=N
         content_html += '\n            <h2>각주</h2>'
         for footnote in footnotes:
             content_html += f'\n            <aside epub:type="footnote" role="doc-footnote" id="{footnote["id"]}">'
-            content_html += f'\n                <p>{footnote["content"]}</p>'
+            content_html += f'\n                <p>{html_escape(footnote["content"])}</p>'
             content_html += '\n            </aside>'
         content_html += '\n        </aside>'
     
@@ -2378,21 +2411,22 @@ def create_epub3_book(docx_file_path, output_dir, book_title=None, book_author=N
     
     manifest_items.append(f'<item id="content" href="{content_filename}" media-type="application/xhtml+xml"/>')
     spine_items.append('<itemref idref="content"/>')
+    spine_items.append('<itemref idref="nav"/>')
     html_files.append(content_filename)
     
     # package.opf 파일 생성 (G135, G136 지침 준수)
     package_opf = f'''<?xml version="1.0" encoding="utf-8" standalone="no"?>
-<package version="3.0" xmlns="http://www.idpf.org/2007/opf" unique-identifier="uid">
+<package version="3.0" xmlns="http://www.idpf.org/2007/opf" unique-identifier="uid" xml:lang="{book_language}">
     <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
         <dc:identifier id="uid">{epub_uid}</dc:identifier>
-        <dc:title>{book_title}</dc:title>
-        <dc:creator>{book_author}</dc:creator>
-        <dc:publisher>{book_publisher}</dc:publisher>
+        <dc:title>{html_escape(book_title)}</dc:title>
+        <dc:creator>{html_escape(book_author)}</dc:creator>
+        <dc:publisher>{html_escape(book_publisher)}</dc:publisher>
         <dc:language>{book_language}</dc:language>
         <dc:date>{datetime.now().strftime("%Y-%m-%d")}</dc:date>
         <dc:format>EPUB3</dc:format>
+        <dc:source>{html_escape(book_isbn)}</dc:source>
         <meta property="dcterms:modified">{datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")}</meta>
-        <meta property="epub:readingOrder">ltr</meta>
         
         <!-- 접근성 메타데이터 (G135 지침) -->
         <meta property="schema:accessMode">textual</meta>
@@ -2408,7 +2442,7 @@ def create_epub3_book(docx_file_path, output_dir, book_title=None, book_author=N
         <meta property="schema:accessibilitySummary">TTAK.KO-10.0905 표준을 준수하여 제작된 접근성 전자책입니다.</meta>
         
         <!-- 접근성 평가 메타데이터 (G136 지침) -->
-        <link property="dcterms:conformsTo" href="http://www.idpf.org/epub/a11y/accessibility-20170105.html#wcag-aa"/>
+        <link rel="dcterms:conformsTo" href="http://www.idpf.org/epub/a11y/accessibility-20170105.html#wcag-aa"/>
         <meta property="a11y:certifiedBy">DOCX to EPUB3 Converter</meta>
         <meta property="a11y:certifierCredential">TTAK.KO-10.0905 표준 준수</meta>
     </metadata>
@@ -2429,26 +2463,30 @@ def create_epub3_book(docx_file_path, output_dir, book_title=None, book_author=N
     nav_items = []
     
     # 제목 페이지
-    nav_items.append(f'''        <li><a href="title.xhtml">{book_title}</a></li>''')
+    nav_items.append(
+        f'''        <li><a href="title.xhtml">{html_escape(book_title)}</a></li>''')
     
     # 목차 항목들
     for item in content_structure:
         if item["type"].startswith("h"):
             level = int(item["type"][1])
             indent = "  " * (level - 1)
-            nav_items.append(f'''{indent}<li><a href="content.xhtml#{item["id"]}">{item["text"]}</a></li>''')
+            nav_items.append(
+                f'''{indent}<li><a href="content.xhtml#{item["id"]}">{html_escape(item["text"])}</a></li>''')
     
     # 표 목차 (G95, G96, G97 지침 준수)
     table_list_items = []
     for item in content_structure:
         if item["type"] == "table":
-            table_list_items.append(f'''        <li><a href="content.xhtml#{item["id"]}">{item["title"]}</a></li>''')
+            table_list_items.append(
+                f'''        <li><a href="content.xhtml#{item["id"]}">{html_escape(item["title"])}</a></li>''')
     
     # 이미지 목차 (G98, G99, G100 지침 준수)
     image_list_items = []
     for item in content_structure:
         if item["type"] == "image":
-            image_list_items.append(f'''        <li><a href="content.xhtml#{item["id"]}">{item["alt_text"]}</a></li>''')
+            image_list_items.append(
+                f'''        <li><a href="content.xhtml#{item["id"]}">{html_escape(item["alt_text"])}</a></li>''')
     
     # 랜드마크 (G101, G102, G103 지침 준수)
     landmark_items = []
@@ -2460,12 +2498,14 @@ def create_epub3_book(docx_file_path, output_dir, book_title=None, book_author=N
     page_list_items = []
     for item in content_structure:
         if item["type"] == "pagenum":
-            page_list_items.append(f'''        <li><a href="content.xhtml#{item["id"]}">{item["text"]}</a></li>''')
+            page_list_items.append(
+                f'''        <li><a href="content.xhtml#{item["id"]}">{html_escape(item["text"])}</a></li>''')
     
     # 각주 목차 (G94 지침 준수)
     footnote_list_items = []
     for i, footnote in enumerate(footnotes, 1):
-        footnote_list_items.append(f'''        <li><a href="content.xhtml#{footnote["id"]}">{footnote["text"]}</a></li>''')
+        footnote_list_items.append(
+            f'''        <li><a href="content.xhtml#{footnote["id"]}">{html_escape(footnote["text"])}</a></li>''')
     
     # 수식 목차 (G95 지침 준수) - MathML 수식이 있을 경우
     math_list_items = []
@@ -2476,7 +2516,8 @@ def create_epub3_book(docx_file_path, output_dir, book_title=None, book_author=N
             if math_match:
                 math_counter += 1
                 math_content = math_match.group(1)
-                math_list_items.append(f'''        <li><a href="content.xhtml#{item["id"]}">수식 {math_counter}: {math_content}</a></li>''')
+                math_list_items.append(
+                    f'''        <li><a href="content.xhtml#{item["id"]}">수식 {math_counter}: {html_escape(math_content)}</a></li>''')
     
     # 링크 목차 (G96 지침 준수) - 외부 링크가 있을 경우
     link_list_items = []
@@ -2487,7 +2528,8 @@ def create_epub3_book(docx_file_path, output_dir, book_title=None, book_author=N
             link_matches = re.findall(r'https?://[^\s<>"]+', item["text"])
             for link in link_matches:
                 link_counter += 1
-                link_list_items.append(f'''        <li><a href="content.xhtml#{item["id"]}">링크 {link_counter}: {link[:50]}...</a></li>''')
+                link_list_items.append(
+                    f'''        <li><a href="content.xhtml#{item["id"]}">링크 {link_counter}: {html_escape(link[:50])}...</a></li>''')
     
     nav_xhtml = f'''<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
@@ -2497,7 +2539,7 @@ def create_epub3_book(docx_file_path, output_dir, book_title=None, book_author=N
     <title>목차</title>
     <link rel="stylesheet" type="text/css" href="style.css"/>
     <!-- 반응형 레이아웃 메타데이터 (G70, G71, G72 지침 준수) -->
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=3.0, user-scalable=yes"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes"/>
 </head>
 <body>
     <nav epub:type="toc" role="doc-toc" id="toc">
@@ -2508,47 +2550,47 @@ def create_epub3_book(docx_file_path, output_dir, book_title=None, book_author=N
     </nav>
     
     <!-- 표 목차 -->
-    <nav epub:type="lot" id="lot">
+    <nav epub:type="lot" id="lot" title="표 목차">
         <h1>표 목차</h1>
         <ol>
-{chr(10).join(table_list_items)}
+{chr(10).join(table_list_items) if table_list_items else '            <li><span>표가 없습니다.</span></li>'}
         </ol>
     </nav>
     
     <!-- 이미지 목차 -->
-    <nav epub:type="loi" id="loi">
+    <nav epub:type="loi" id="loi" title="이미지 목차">
         <h1>이미지 목차</h1>
         <ol>
-{chr(10).join(image_list_items)}
+{chr(10).join(image_list_items) if image_list_items else '            <li><span>이미지가 없습니다.</span></li>'}
         </ol>
     </nav>
     
     <!-- 각주 목차 -->
-    <nav epub:type="lot" id="footnote-list">
+    <nav epub:type="lot" id="footnote-list" title="각주 목차">
         <h1>각주 목차</h1>
         <ol>
-{chr(10).join(footnote_list_items)}
+{chr(10).join(footnote_list_items) if footnote_list_items else '            <li><span>각주가 없습니다.</span></li>'}
         </ol>
     </nav>
     
     <!-- 수식 목차 -->
-    <nav epub:type="lot" id="math-list">
+    <nav epub:type="lot" id="math-list" title="수식 목차">
         <h1>수식 목차</h1>
         <ol>
-{chr(10).join(math_list_items)}
+{chr(10).join(math_list_items) if math_list_items else '            <li><span>수식이 없습니다.</span></li>'}
         </ol>
     </nav>
     
     <!-- 링크 목차 -->
-    <nav epub:type="lot" id="link-list">
+    <nav epub:type="lot" id="link-list" title="링크 목차">
         <h1>링크 목차</h1>
         <ol>
-{chr(10).join(link_list_items)}
+{chr(10).join(link_list_items) if link_list_items else '            <li><span>링크가 없습니다.</span></li>'}
         </ol>
     </nav>
     
     <!-- 랜드마크 -->
-    <nav epub:type="landmarks" id="landmarks">
+    <nav epub:type="landmarks" id="landmarks" title="랜드마크">
         <h1>랜드마크</h1>
         <ol>
 {chr(10).join(landmark_items)}
@@ -2556,10 +2598,10 @@ def create_epub3_book(docx_file_path, output_dir, book_title=None, book_author=N
     </nav>
     
     <!-- 페이지 목차 -->
-    <nav epub:type="page-list" role="doc-pagelist" id="page-list">
+    <nav epub:type="page-list" role="doc-pagelist" id="page-list" title="페이지 목차">
         <h1>페이지 목차</h1>
         <ol>
-{chr(10).join(page_list_items)}
+{chr(10).join(page_list_items) if page_list_items else '            <li><span>페이지 번호가 없습니다.</span></li>'}
         </ol>
     </nav>
 </body>
@@ -3051,8 +3093,7 @@ a[href^="http"] {
     border-bottom: 1px dotted #0066cc;
 }
 
-/* MathML 스타일 (G81 지침) */
-}'''
+'''
     
     with open(os.path.join(oebps_dir, "style.css"), "w", encoding="utf-8") as f:
         f.write(css_content)
@@ -3061,6 +3102,10 @@ a[href^="http"] {
     epub_filename = os.path.join(output_dir, f"{book_title.replace(' ', '_')}.epub")
     
     with zipfile.ZipFile(epub_filename, 'w', zipfile.ZIP_DEFLATED) as epub_zip:
+        # mimetype 파일 (첫 번째 파일이어야 함)
+        epub_zip.writestr("mimetype", "application/epub+zip",
+                          compress_type=zipfile.ZIP_STORED)
+
         # META-INF/container.xml
         epub_zip.write(os.path.join(meta_inf_dir, "container.xml"), "META-INF/container.xml")
         
