@@ -23,6 +23,7 @@ REDIS_PORT = int(os.environ.get('REDIS_PORT', 6379))
 REDIS_DB = int(os.environ.get('REDIS_DB', 0))
 REDIS_PASSWORD = os.environ.get('REDIS_PASSWORD', None)
 QUEUE_NAME = os.environ.get('QUEUE_NAME', 'daisy_queue')
+MAX_WORKERS = int(os.environ.get('MAX_WORKERS', 6))  # 최대 워커 수 (기본값: 6)
 
 def get_redis_connection():
     """Redis 연결을 생성하고 반환합니다."""
@@ -89,8 +90,8 @@ def start_worker(num_workers=1, worker_name=None):
 def start_worker_pool(num_workers=None):
     """여러 워커를 병렬로 시작합니다."""
     if num_workers is None:
-        # CPU 코어 수에 기반하여 워커 수 결정 (최대 4개로 제한)
-        num_workers = min(multiprocessing.cpu_count(), 4)
+        # CPU 코어 수에 기반하여 워커 수 결정 (환경 변수로 제한)
+        num_workers = min(multiprocessing.cpu_count(), MAX_WORKERS)
     
     logger.info(f"워커 풀 시작: {num_workers}개의 워커")
     

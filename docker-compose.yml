@@ -63,22 +63,23 @@ services:
       - REDIS_PORT=6379
       - REDIS_DB=0
       - QUEUE_NAME=daisy_queue
+      - MAX_WORKERS=4
     depends_on:
       redis:
         condition: service_healthy
     restart: always
-    command: ["docx-to-daisy-worker"]
+    command: ["docx-to-daisy-worker", "--auto-scale"]
     volumes:
       - temp_data:/tmp
     deploy:
-      replicas: 1
+      replicas: 3
       resources:
         limits:
-          memory: 2G
-          cpus: '2.0'
-        reservations:
           memory: 1G
           cpus: '1.0'
+        reservations:
+          memory: 512M
+          cpus: '0.5'
 
   # 모니터링 서비스 (선택사항)
   monitor:
