@@ -12,7 +12,8 @@ import time
 import json
 from typing import Dict, Any, Optional
 
-from .cli import create_daisy_book, zip_daisy_output, create_epub3_book
+from .converter.docxTodaisy import create_daisy_book, zip_daisy_output
+from .converter.docxToepub import create_epub3_book
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)

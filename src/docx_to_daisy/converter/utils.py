@@ -8,7 +8,7 @@ import html
 from docx import Document  # python-docx 라이브러리
 from lxml import etree  # lxml 라이브러리
 from datetime import datetime
-from .markers import MarkerProcessor  # 마커 처리기 임포트
+from ..markers import MarkerProcessor  # 마커 처리기 임포트
 import gc
 
 # 로깅 설정

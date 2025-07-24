@@ -17,8 +17,8 @@ from starlette.types import ASGIApp
 from fastapi.params import Path as FastAPIPath
 from rq.worker import Worker
 
-from docx_to_daisy.converter.docxTodaisy import create_daisy_book, zip_daisy_output
-from docx_to_daisy.converter.docxToepub import create_epub3_book
+from .converter.docxTodaisy import create_daisy_book, zip_daisy_output
+from .converter.docxToepub import create_epub3_book
 from .tasks import process_conversion_task, process_epub3_conversion_task
 from .websocket import status_listener, manager
 from .events import start_event_listener, stop_event_listener
