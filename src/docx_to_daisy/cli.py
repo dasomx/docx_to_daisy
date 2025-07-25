@@ -362,9 +362,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             except:
                 pass
             
-            image_filename = f"images/image{img_num}{image_ext}"
-            image_dir = os.path.join(output_dir, "images")
-            os.makedirs(image_dir, exist_ok=True)
+            image_filename = f"image{img_num}{image_ext}"
             image_path = os.path.join(output_dir, image_filename)
             
             # 이미지 데이터 저장
@@ -1706,9 +1704,7 @@ def create_epub3_book(docx_file_path, output_dir, book_title=None, book_author=N
             except:
                 pass
             
-            image_filename = f"images/image{img_num}{image_ext}"
-            image_dir = os.path.join(output_dir, "images")
-            os.makedirs(image_dir, exist_ok=True)
+            image_filename = f"image{img_num}{image_ext}"
             image_path = os.path.join(output_dir, image_filename)
             
             # 이미지 데이터 저장
