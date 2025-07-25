@@ -370,8 +370,29 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                 img_file.write(img['image_data'])
             print(f"이미지 {img_num} 저장: {image_path}")
             
+            # 이미지의 실제 위치 계산 (body 요소 내에서의 순서)
+            image_position = len(document.paragraphs)  # 기본값
+            try:
+                body_element = document._element.body
+                all_elements = list(body_element.iterchildren())
+                
+                # 이미지가 포함된 단락의 실제 위치 찾기
+                img_para_element = img['paragraph']._element
+                for idx, element in enumerate(all_elements):
+                    if element is img_para_element:
+                        # 해당 요소까지의 단락 수 계산
+                        para_count = 0
+                        for elem_idx in range(idx):
+                            if all_elements[elem_idx].tag.endswith('p'):
+                                para_count += 1
+                        image_position = para_count
+                        break
+                        
+                print(f"이미지 {img_num} 정확한 위치 발견: {image_position}")
+            except Exception as e:
+                print(f"이미지 {img_num} 위치 계산 중 오류: {e}, 기본 위치 사용: {image_position}")
+            
             # 이미지 정보를 content_structure에 추가
-            para_position = element_index.get(id(img['paragraph']._element), img['paragraph_index'])
             content_structure.append({
                 "type": "image",
                 "src": image_filename,
@@ -380,10 +401,11 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                 "sent_id": sent_id,
                 "level": 0,
                 "markers": [],
-                "position": para_position,
-                "insert_before": False
+                "position": image_position,
+                "insert_before": False,
+                "image_number": img_num
             })
-            print(f"이미지 {img_num}를 content_structure에 추가함 (위치: {para_position})")
+            print(f"이미지 {img_num}를 content_structure에 추가함 (위치: {image_position})")
         except Exception as e:
             print(f"이미지 {img_num} 처리 중 오류 발생: {str(e)}")
             continue
@@ -581,12 +603,13 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                         col_data.append(cell_text)
                 table_data["cols"].append(col_data)
             
-            # 표의 실제 위치를 찾기
-            table_position_body = len(document.paragraphs)
+            # 표의 실제 위치를 찾기 (이미지와 동일한 방식으로 계산)
+            table_position_body = len(document.paragraphs)  # 기본값
             try:
                 body_element = document._element.body
                 all_elements = list(body_element.iterchildren())
                 
+                # 표 요소의 실제 위치 찾기
                 table_element_index = -1
                 for idx, element in enumerate(all_elements):
                     if element is table._element:
@@ -594,20 +617,21 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                         break
                         
                 if table_element_index != -1:
-                    paragraph_count_before_table = 0
-                    for idx in range(table_element_index):
-                        element = all_elements[idx]
-                        if element.tag.endswith('p'):
-                            paragraph_count_before_table += 1
+                    # 해당 요소까지의 단락 수 계산 (이미지와 동일한 방식)
+                    para_count = 0
+                    for elem_idx in range(table_element_index):
+                        if all_elements[elem_idx].tag.endswith('p'):
+                            para_count += 1
                     
-                    table_position_body = paragraph_count_before_table
+                    table_position_body = para_count
                     print(f"표 {table_idx} 정확한 위치 발견: {table_position_body}")
                 else:
+                    # 표 요소를 찾지 못한 경우 패턴 매칭으로 시도
                     for para_idx, para in enumerate(document.paragraphs):
                         para_text = para.text.strip()
                         if re.search(r'\[?표\s*\d+\.?\d*\]?', para_text, re.IGNORECASE):
-                            table_position_body = para_idx + 0.5
-                            print(f"표 {table_idx} 제목 패턴 위치 발견: {para_idx + 0.5}")
+                            table_position_body = para_idx
+                            print(f"표 {table_idx} 제목 패턴 위치 발견: {para_idx}")
                             break
                     
                     if table_position_body == len(document.paragraphs):
@@ -644,10 +668,11 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     # 메모리 정리
     gc.collect()
 
-    # 콘텐츠를 위치에 따라 정렬
+    # 콘텐츠를 실제 위치에 따라 정렬 (통일된 방식)
     content_structure.sort(key=lambda x: (x["position"], 
-                                         x.get("image_number", float('inf')) if x["type"] == "image" else 0, 
-                                         not x["insert_before"]))
+                                         not x["insert_before"],
+                                         x.get("image_number", 0) if x["type"] == "image" else 0,
+                                         x.get("table_number", 0) if x["type"] == "table" else 0))
 
     print(f"총 {len(content_structure)}개의 구조 요소 분석 완료.")
 
