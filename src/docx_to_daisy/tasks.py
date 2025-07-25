@@ -10,10 +10,12 @@ import shutil
 import uuid
 import time
 import json
+import zipfile
 from typing import Dict, Any, Optional
 
 from .converter.docxTodaisy import create_daisy_book, zip_daisy_output
 from .converter.docxToepub import create_epub3_book
+from .converter.daisyToepub import create_epub3_from_daisy, zip_epub_output
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
@@ -321,4 +323,146 @@ def process_epub3_conversion_task(file_path, output_path, title=None, author=Non
         # 임시 파일 정리
         if output_dir:
             cleanup_temp_files(output_dir)
+        raise
+
+
+def process_daisy_to_epub_task(zip_file_path, output_path, title=None, author=None, publisher=None, language="ko"):
+    """
+    DAISY ZIP 파일을 EPUB3 형식으로 변환하는 작업을 처리합니다.
+    
+    Args:
+        zip_file_path (str): DAISY 파일들이 포함된 ZIP 파일 경로
+        output_path (str): 결과 EPUB 파일 경로
+        title (str, optional): 책 제목
+        author (str, optional): 저자
+        publisher (str, optional): 출판사
+        language (str, optional): 언어 코드 (기본값: ko)
+        
+    Returns:
+        str: 생성된 EPUB 파일 경로
+    """
+    # 현재 작업 ID 가져오기 (RQ는 현재 작업 컨텍스트 제공)
+    from rq import get_current_job
+    job = get_current_job()
+    job_id = job.id if job else None
+    
+    logger.info(f"DAISY to EPUB3 변환 작업 시작: {zip_file_path}, 제목={title}, 저자={author}, 출판사={publisher}, 언어={language}")
+    
+    # 임시 디렉토리 초기화
+    temp_daisy_dir = None
+    
+    try:
+        if job_id:
+            update_job_progress(job_id, 0, "DAISY to EPUB3 변환 작업이 시작되었습니다.")
+        
+        # ZIP 파일 검증
+        if job_id:
+            update_job_progress(job_id, 10, "ZIP 파일 검증 중...")
+        
+        # 파일 존재 확인
+        if not os.path.exists(zip_file_path):
+            error_msg = f"ZIP 파일을 찾을 수 없습니다: {zip_file_path}"
+            logger.error(error_msg)
+            if job_id:
+                update_job_progress(job_id, -1, error_msg)
+            raise FileNotFoundError(error_msg)
+        
+        # 임시 디렉토리 생성
+        temp_daisy_dir = TEMP_DIR / f"daisy_extract_{uuid.uuid4()}"
+        temp_daisy_dir.mkdir(exist_ok=True)
+        
+        # ZIP 파일 압축 해제
+        if job_id:
+            update_job_progress(job_id, 20, "ZIP 파일 압축 해제 중...")
+        
+        logger.info(f"ZIP 파일 압축 해제 시작: {zip_file_path} -> {temp_daisy_dir}")
+        with zipfile.ZipFile(zip_file_path, 'r') as zip_ref:
+            zip_ref.extractall(temp_daisy_dir)
+        logger.info("ZIP 파일 압축 해제 완료")
+        
+        # dtbook.xml 파일 존재 확인
+        dtbook_file = temp_daisy_dir / "dtbook.xml"
+        if not dtbook_file.exists():
+            error_msg = f"dtbook.xml 파일을 찾을 수 없습니다: {dtbook_file}"
+            logger.error(error_msg)
+            if job_id:
+                update_job_progress(job_id, -1, error_msg)
+            raise FileNotFoundError(error_msg)
+        
+        # EPUB3 파일 생성
+        if job_id:
+            update_job_progress(job_id, 30, "EPUB3 파일 생성 중...")
+        
+        logger.info("EPUB3 파일 생성 시작")
+        epub_file_path = create_epub3_from_daisy(
+            daisy_dir=str(temp_daisy_dir),
+            output_dir=str(temp_daisy_dir / "epub_output"),
+            book_title=title,
+            book_author=author,
+            book_publisher=publisher,
+            book_language=language
+        )
+        logger.info("EPUB3 파일 생성 완료")
+        
+        if job_id:
+            update_job_progress(job_id, 80, "EPUB3 파일 생성 완료, EPUB 파일 복사 중...")
+        
+        # 생성된 EPUB 파일을 최종 출력 경로로 복사
+        logger.info("EPUB 파일 복사 시작")
+        shutil.copy2(epub_file_path, output_path)
+        logger.info(f"EPUB 파일 복사 완료: {output_path}")
+        
+        if job_id:
+            update_job_progress(job_id, 100, "DAISY to EPUB3 변환 작업이 완료되었습니다.", {"output_path": output_path})
+            
+            # Redis에 완료 상태 저장 (API에서 확인할 수 있도록)
+            try:
+                from redis import Redis
+                redis_conn = Redis(
+                    host=os.environ.get('REDIS_HOST', 'localhost'),
+                    port=int(os.environ.get('REDIS_PORT', 6379)),
+                    db=int(os.environ.get('REDIS_DB', 0)),
+                    password=os.environ.get('REDIS_PASSWORD', None),
+                    socket_connect_timeout=5,
+                    socket_timeout=5,
+                    retry_on_timeout=True,
+                    health_check_interval=30
+                )
+                
+                # 작업 완료 상태를 Redis에 저장
+                completion_key = f"docx_to_daisy:completion:{job_id}"
+                redis_conn.set(completion_key, json.dumps({
+                    'status': 'finished',
+                    'output_path': output_path,
+                    'completed_at': time.time()
+                }), ex=86400)  # 24시간 만료
+                
+            except Exception as e:
+                logger.warning(f"Redis에 완료 상태 저장 실패: {str(e)}")
+        
+        return output_path
+    
+    except FileNotFoundError as e:
+        error_msg = f"파일을 찾을 수 없습니다: {str(e)}"
+        logger.error(error_msg)
+        if job_id:
+            update_job_progress(job_id, -1, error_msg)
+        raise
+    except ValueError as e:
+        error_msg = f"입력 데이터 오류: {str(e)}"
+        logger.error(error_msg)
+        if job_id:
+            update_job_progress(job_id, -1, error_msg)
+        raise
+    except Exception as e:
+        error_msg = f"DAISY to EPUB3 변환 작업 중 예상치 못한 오류 발생: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        
+        # 오류 상태 업데이트
+        if job_id:
+            update_job_progress(job_id, -1, error_msg)
+        
+        # 임시 파일 정리
+        if temp_daisy_dir:
+            cleanup_temp_files(temp_daisy_dir)
         raise 

@@ -2,6 +2,7 @@ import os
 import tempfile
 import uuid
 import logging
+import json
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Form, WebSocket, WebSocketDisconnect, Depends, Query, Request, Response
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,7 +20,8 @@ from rq.worker import Worker
 
 from .converter.docxTodaisy import create_daisy_book, zip_daisy_output
 from .converter.docxToepub import create_epub3_book
-from .tasks import process_conversion_task, process_epub3_conversion_task
+from .converter.daisyToepub import create_epub3_from_daisy, zip_epub_output
+from .tasks import process_conversion_task, process_epub3_conversion_task, process_daisy_to_epub_task
 from .websocket import status_listener, manager
 from .events import start_event_listener, stop_event_listener
 
@@ -300,19 +302,27 @@ async def get_task_status(task_id: str = FastAPIPath(..., description="변환 �
             
             # 결과 파일 정보 추가
             if status == "finished":
+                # 로컬 상태에서 format 정보 확인
+                format_type = job_statuses.get(task_id, {}).get("format", "unknown")
+                
                 zip_file_path = RESULTS_DIR / f"{task_id}.zip"
                 epub_file_path = RESULTS_DIR / f"{task_id}.epub"
                 
-                if zip_file_path.exists():
-                    response["download_url"] = f"/download/{task_id}"
-                    response["format"] = "daisy"
+                if format_type == "daisy_to_epub3" and epub_file_path.exists():
+                    response["download_url"] = f"/download-daisy-to-epub/{task_id}"
+                    response["format"] = "daisy_to_epub3"
                     if "message" not in response or not response["message"]:
-                        response["message"] = "DAISY 변환 작업이 완료되었습니다. 다운로드 URL을 사용하여 결과를 받으세요."
-                elif epub_file_path.exists():
+                        response["message"] = "DAISY to EPUB3 변환 작업이 완료되었습니다. 다운로드 URL을 사용하여 결과를 받으세요."
+                elif format_type == "epub3" and epub_file_path.exists():
                     response["download_url"] = f"/download-epub/{task_id}"
                     response["format"] = "epub3"
                     if "message" not in response or not response["message"]:
                         response["message"] = "EPUB3 변환 작업이 완료되었습니다. 다운로드 URL을 사용하여 결과를 받으세요."
+                elif zip_file_path.exists():
+                    response["download_url"] = f"/download/{task_id}"
+                    response["format"] = "daisy"
+                    if "message" not in response or not response["message"]:
+                        response["message"] = "DAISY 변환 작업이 완료되었습니다. 다운로드 URL을 사용하여 결과를 받으세요."
                 else:
                     if "message" not in response or not response["message"]:
                         response["message"] = "변환 작업이 완료되었지만 결과 파일을 찾을 수 없습니다."
@@ -465,6 +475,11 @@ async def root():
             "epub3": {
                 "convert": "/convert-epub3",
                 "download": "/download-epub/{task_id}",
+                "status": "/task/{task_id}"
+            },
+            "daisy_to_epub": {
+                "convert": "/convert-daisy-to-epub",
+                "download": "/download-daisy-to-epub/{task_id}",
                 "status": "/task/{task_id}"
             },
             "websocket": "/ws/task/{task_id}"
@@ -754,6 +769,170 @@ async def convert_docx_to_epub3(
         if temp_docx_path.exists():
             temp_docx_path.unlink()
         raise HTTPException(status_code=500, detail=f"EPUB3 변환 작업 등록 중 오류가 발생했습니다: {str(e)}")
+
+@app.post("/convert-daisy-to-epub")
+async def convert_daisy_to_epub(
+    file: UploadFile = File(...),
+    title: Optional[str] = Form(None),
+    author: Optional[str] = Form(None),
+    publisher: Optional[str] = Form(None),
+    language: str = Form("ko"),
+    background_tasks: BackgroundTasks = None
+):
+    """
+    DAISY ZIP 파일을 EPUB3 형식으로 변환하고 작업 ID를 반환합니다.
+    
+    - **file**: DAISY 파일들이 포함된 ZIP 파일
+    - **title**: 책 제목 (선택 사항)
+    - **author**: 저자 (선택 사항)
+    - **publisher**: 출판사 (선택 사항)
+    - **language**: 언어 코드 (기본값: ko)
+    """
+    logger.info(f"DAISY to EPUB3 변환 요청 받음: 파일명={file.filename}, 제목={title}, 저자={author}, 출판사={publisher}, 언어={language}")
+    
+    # 파일 확장자 확인
+    if not file.filename.lower().endswith('.zip'):
+        logger.error(f"잘못된 파일 형식: {file.filename}")
+        raise HTTPException(status_code=400, detail="ZIP 파일만 업로드 가능합니다.")
+    
+    # 고유 ID 생성
+    task_id = str(uuid.uuid4())
+    logger.info(f"DAISY to EPUB3 작업 ID 생성: {task_id}")
+    
+    # 임시 파일 경로 설정
+    temp_zip_path = TEMP_DIR / f"{task_id}.zip"
+    epub_file_path = RESULTS_DIR / f"{task_id}.epub"
+    
+    try:
+        # 업로드된 파일 저장
+        logger.info(f"임시 ZIP 파일 저장 시작: {temp_zip_path}")
+        with open(temp_zip_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        logger.info("임시 ZIP 파일 저장 완료")
+        
+        # 큐에 작업 추가
+        queue = get_queue()
+        job = queue.enqueue(
+            process_daisy_to_epub_task,
+            args=(
+                str(temp_zip_path),
+                str(epub_file_path),
+                title,
+                author,
+                publisher,
+                language
+            ),
+            job_id=task_id,
+            timeout=3600,  # 1시간 제한
+            job_timeout=3600,
+            result_ttl=86400,  # 결과는 24시간 유지
+            ttl=86400  # 작업은 24시간 유지
+        )
+        
+        # 작업 상태 설정
+        job_statuses[task_id] = {
+            "status": "queued",
+            "filename": file.filename,
+            "title": title,
+            "author": author,
+            "publisher": publisher,
+            "language": language,
+            "format": "daisy_to_epub3"
+        }
+        
+        logger.info(f"DAISY to EPUB3 작업이 큐에 추가됨: {task_id}")
+        
+        return {
+            "task_id": task_id,
+            "status": "queued",
+            "message": "DAISY to EPUB3 변환 작업이 큐에 추가되었습니다. 상태 조회 API를 사용하여 작업 상태를 확인하세요."
+        }
+    
+    except HTTPException:
+        # HTTPException은 그대로 전달
+        raise
+    except redis.ConnectionError as e:
+        logger.error(f"Redis 연결 오류로 인한 DAISY to EPUB3 변환 작업 등록 실패: {str(e)}")
+        # 임시 파일 정리
+        if temp_zip_path.exists():
+            temp_zip_path.unlink()
+        raise HTTPException(status_code=503, detail=f"Redis 서버에 연결할 수 없어 DAISY to EPUB3 변환 작업을 등록할 수 없습니다: {str(e)}")
+    except Exception as e:
+        logger.error(f"DAISY to EPUB3 변환 작업 등록 중 오류 발생: {str(e)}", exc_info=True)
+        # 오류 발생 시 임시 파일 정리
+        if temp_zip_path.exists():
+            temp_zip_path.unlink()
+        raise HTTPException(status_code=500, detail=f"DAISY to EPUB3 변환 작업 등록 중 오류가 발생했습니다: {str(e)}")
+
+@app.get("/download-daisy-to-epub/{task_id}")
+async def download_daisy_to_epub_result(task_id: str = FastAPIPath(..., description="다운로드할 DAISY to EPUB3 변환 작업 ID")):
+    """
+    DAISY to EPUB3 변환 결과를 다운로드합니다.
+    
+    - **task_id**: 다운로드할 변환 작업 ID
+    """
+    logger.info(f"DAISY to EPUB3 결과 다운로드 요청: {task_id}")
+    
+    try:
+        # Redis에서 작업 상태 확인
+        redis_conn = get_redis_connection()
+        try:
+            job = Job.fetch(task_id, connection=redis_conn)
+            status = job.get_status()
+            
+            logger.info(f"DAISY to EPUB 다운로드 - 작업 상태: {status}")
+            
+            if status != "finished":
+                raise HTTPException(status_code=400, detail="변환 작업이 아직 완료되지 않았습니다.")
+                
+        except NoSuchJobError:
+            # 작업을 찾을 수 없는 경우, Redis에서 완료 상태 확인
+            completion_key = f"docx_to_daisy:completion:{task_id}"
+            completion_data = redis_conn.get(completion_key)
+            
+            if completion_data:
+                completion_info = json.loads(completion_data)
+                if completion_info.get('status') == 'finished':
+                    # 완료 상태가 확인되면 계속 진행
+                    pass
+                else:
+                    raise HTTPException(status_code=400, detail="변환 작업이 아직 완료되지 않았습니다.")
+            else:
+                # 완료 상태도 없으면 결과 파일이 있는지 확인
+                epub_file_path = RESULTS_DIR / f"{task_id}.epub"
+                if not epub_file_path.exists():
+                    raise HTTPException(status_code=404, detail="작업을 찾을 수 없습니다.")
+        
+        # EPUB 파일 경로 확인
+        epub_file_path = RESULTS_DIR / f"{task_id}.epub"
+        if not epub_file_path.exists():
+            raise HTTPException(status_code=404, detail="EPUB 파일을 찾을 수 없습니다.")
+        
+        # 파일명 생성
+        title = "Unknown"
+        # Redis에서 작업 메타데이터 확인
+        try:
+            job = Job.fetch(task_id, connection=redis_conn)
+            if job.meta and 'title' in job.meta:
+                title = job.meta['title']
+        except:
+            pass
+        safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).rstrip()
+        filename = f"{safe_title}.epub"
+        
+        logger.info(f"DAISY to EPUB3 파일 다운로드: {epub_file_path}")
+        
+        return FileResponse(
+            path=str(epub_file_path),
+            filename=filename,
+            media_type="application/epub+zip"
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"DAISY to EPUB3 결과 다운로드 중 오류 발생: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"다운로드 중 오류가 발생했습니다: {str(e)}")
 
 @app.get("/queue/status")
 async def get_queue_status():

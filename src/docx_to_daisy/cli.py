@@ -9,6 +9,7 @@ from docx import Document  # python-docx 라이브러리
 from lxml import etree  # lxml 라이브러리
 from datetime import datetime
 from .markers import MarkerProcessor  # 마커 처리기 임포트
+from .converter.daisyToepub import create_epub3_from_daisy, zip_epub_output
 import gc
 
 # 로깅 설정
@@ -3134,3 +3135,98 @@ a[href^="http"] {
     print("TTAK.KO-10.0905 표준을 준수하여 제작되었습니다.")
     
     return epub_filename
+
+
+def main():
+    """메인 함수 - 명령행 인터페이스"""
+    parser = argparse.ArgumentParser(description="DOCX/DAISY 변환 도구")
+    subparsers = parser.add_subparsers(dest='command', help='사용 가능한 명령')
+    
+    # DOCX to DAISY 변환
+    docx_parser = subparsers.add_parser('docx2daisy', help='DOCX를 DAISY로 변환')
+    docx_parser.add_argument("docx_file", help="변환할 DOCX 파일 경로")
+    docx_parser.add_argument("output_dir", help="출력 디렉토리 경로")
+    docx_parser.add_argument("--title", help="책 제목")
+    docx_parser.add_argument("--author", help="저자")
+    docx_parser.add_argument("--publisher", help="출판사")
+    docx_parser.add_argument("--language", default="ko", help="언어 코드 (기본값: ko)")
+    docx_parser.add_argument("--zip", action="store_true", help="DAISY ZIP 파일로 압축")
+    
+    # DOCX to EPUB3 변환
+    epub_parser = subparsers.add_parser('docx2epub', help='DOCX를 EPUB3로 변환')
+    epub_parser.add_argument("docx_file", help="변환할 DOCX 파일 경로")
+    epub_parser.add_argument("output_dir", help="출력 디렉토리 경로")
+    epub_parser.add_argument("--title", help="책 제목")
+    epub_parser.add_argument("--author", help="저자")
+    epub_parser.add_argument("--publisher", help="출판사")
+    epub_parser.add_argument("--language", default="ko", help="언어 코드 (기본값: ko)")
+    epub_parser.add_argument("--isbn", default="NOT_GIVEN_ISBN", help="ISBN")
+    
+    # DAISY to EPUB3 변환
+    daisy_parser = subparsers.add_parser('daisy2epub', help='DAISY를 EPUB3로 변환')
+    daisy_parser.add_argument("daisy_dir", help="DAISY 파일들이 있는 디렉토리 경로")
+    daisy_parser.add_argument("output_dir", help="출력 디렉토리 경로")
+    daisy_parser.add_argument("--title", help="책 제목")
+    daisy_parser.add_argument("--author", help="저자")
+    daisy_parser.add_argument("--publisher", help="출판사")
+    daisy_parser.add_argument("--language", default="ko", help="언어 코드 (기본값: ko)")
+    daisy_parser.add_argument("--zip", action="store_true", help="EPUB ZIP 파일로 압축")
+    
+    args = parser.parse_args()
+    
+    if not args.command:
+        parser.print_help()
+        return 1
+    
+    try:
+        if args.command == 'docx2daisy':
+            # DOCX to DAISY 변환
+            create_daisy_book(
+                args.docx_file,
+                args.output_dir,
+                args.title,
+                args.author,
+                args.publisher,
+                args.language
+            )
+            
+            if args.zip:
+                zip_filename = os.path.join(args.output_dir, "daisy_output.zip")
+                zip_daisy_output(args.output_dir, zip_filename)
+                
+        elif args.command == 'docx2epub':
+            # DOCX to EPUB3 변환
+            create_epub3_book(
+                args.docx_file,
+                args.output_dir,
+                args.title,
+                args.author,
+                args.publisher,
+                args.language,
+                args.isbn
+            )
+            
+        elif args.command == 'daisy2epub':
+            # DAISY to EPUB3 변환
+            epub_dir = create_epub3_from_daisy(
+                args.daisy_dir,
+                args.output_dir,
+                args.title,
+                args.author,
+                args.publisher,
+                args.language
+            )
+            
+            if args.zip:
+                epub_filename = os.path.join(args.output_dir, "result.epub")
+                zip_epub_output(epub_dir, epub_filename)
+                
+    except Exception as e:
+        print(f"오류: {e}")
+        return 1
+    
+    return 0
+
+
+if __name__ == "__main__":
+    exit(main())
