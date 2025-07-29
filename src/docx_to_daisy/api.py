@@ -203,8 +203,8 @@ async def convert_docx_to_daisy(
                 language
             ),
             job_id=task_id,
-            timeout=3600,  # 1시간 제한
-            job_timeout=3600,
+            timeout=6000,  # 1시간 제한
+            job_timeout=6000,
             result_ttl=86400,  # 결과는 24시간 유지
             ttl=86400,  # 작업은 24시간 유지
             priority=priority  # 우선순위 설정
@@ -630,8 +630,8 @@ async def convert_docx_to_daisy_batch(
                     language
                 ),
                 job_id=task_id,
-                timeout=3600,  # 1시간 제한
-                job_timeout=3600,
+                timeout=6000,  # 1시간 제한
+                job_timeout=6000,
                 result_ttl=86400,  # 결과는 24시간 유지
                 ttl=86400  # 작업은 24시간 유지
             )
@@ -729,8 +729,8 @@ async def convert_docx_to_epub3(
                 language
             ),
             job_id=task_id,
-            timeout=3600,  # 1시간 제한
-            job_timeout=3600,
+            timeout=6000,  # 1시간 제한
+            job_timeout=6000,
             result_ttl=86400,  # 결과는 24시간 유지
             ttl=86400  # 작업은 24시간 유지
         )
@@ -823,8 +823,8 @@ async def convert_daisy_to_epub(
                 language
             ),
             job_id=task_id,
-            timeout=3600,  # 1시간 제한
-            job_timeout=3600,
+            timeout=6000,  # 1시간 제한
+            job_timeout=6000,
             result_ttl=86400,  # 결과는 24시간 유지
             ttl=86400  # 작업은 24시간 유지
         )

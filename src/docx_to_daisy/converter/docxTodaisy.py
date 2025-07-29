@@ -95,10 +95,50 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     body_children = list(document._element.body.iterchildren())
     element_index = {id(child): idx for idx, child in enumerate(body_children)}
 
-    # 1. 문서에서 모든 이미지 찾기
+    # 절대 위치 계산 함수 정의
+    def get_absolute_position(element):
+        """요소의 절대적인 순서를 반환"""
+        try:
+            return body_children.index(element)
+        except ValueError:
+            # 요소를 찾을 수 없는 경우 기본값 반환
+            return len(body_children)
+
+    # 이미지의 실제 문서 내 위치를 계산하는 함수
+    def get_image_document_position(para_idx, run_idx):
+        """이미지의 실제 문서 내 위치를 계산합니다.
+        단락 인덱스와 런 인덱스를 기반으로 정확한 위치를 반환합니다."""
+        # 기본 위치는 단락 순서
+        base_position = para_idx * 1000  # 단락별로 1000 단위로 구분
+        
+        # 런 인덱스를 더해서 같은 단락 내에서의 순서 결정
+        run_position = run_idx
+        
+        return base_position + run_position
+
+    # 1. 문서에서 모든 이미지 찾기 (표 밖의 이미지만)
     print("문서에서 이미지 찾는 중...")
     images = find_all_images(document)
     print(f"총 {len(images)}개의 이미지 발견")
+
+    # 표 밖의 이미지만 필터링
+    standalone_images = []
+    for img in images:
+        # 이미지가 표 안에 있는지 확인
+        is_in_table = False
+        current_element = img['paragraph']._element
+        while current_element.getparent() is not None:
+            parent = current_element.getparent()
+            if parent.tag.endswith('tbl'):  # 표 요소인지 확인
+                is_in_table = True
+                break
+            current_element = parent
+        
+        if not is_in_table:
+            standalone_images.append(img)
+
+    print(f"표 밖의 이미지: {len(standalone_images)}개")
+    print(f"표 안의 이미지: {len(images) - len(standalone_images)}개")
     
     # 2. 문서에서 모든 이미지 추출
     print(f"문서에서 이미지 추출 중...")
@@ -120,8 +160,8 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     # 이미지 매핑 정보 초기화
     image_mapping = {}  # 이미지 번호 -> 이미지 관계 매핑
 
-    # 이미지 처리
-    for i, img in enumerate(images, 1):
+    # 이미지 처리 - 실제 문서 위치 기반으로 처리
+    for i, img in enumerate(standalone_images, 1):
         img_num = str(i)
         try:
             image_counter += 1
@@ -144,9 +184,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             except:
                 pass
             
-            image_filename = f"images/image{img_num}{image_ext}"
-            image_dir = os.path.join(output_dir, "images")
-            os.makedirs(image_dir, exist_ok=True)
+            image_filename = f"image{img_num}{image_ext}"
             image_path = os.path.join(output_dir, image_filename)
             
             # 이미지 데이터 저장
@@ -154,8 +192,8 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                 img_file.write(img['image_data'])
             print(f"이미지 {img_num} 저장: {image_path}")
             
-            # 이미지 정보를 content_structure에 추가
-            para_position = element_index.get(id(img['paragraph']._element), img['paragraph_index'])
+            # 이미지 정보를 content_structure에 추가 - 실제 문서 위치 사용
+            document_position = get_image_document_position(img['paragraph_index'], img['run_index'])
             content_structure.append({
                 "type": "image",
                 "src": image_filename,
@@ -164,10 +202,13 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                 "sent_id": sent_id,
                 "level": 0,
                 "markers": [],
-                "position": para_position,
-                "insert_before": False
+                "position": document_position,
+                "image_number": i,  # 이미지 번호 추가
+                "insert_before": False,
+                "para_index": img['paragraph_index'],  # 단락 인덱스 추가
+                "run_index": img['run_index']  # 런 인덱스 추가
             })
-            print(f"이미지 {img_num}를 content_structure에 추가함 (위치: {para_position})")
+            print(f"이미지 {img_num}를 content_structure에 추가함 (문서 위치: {document_position}, 단락: {img['paragraph_index']}, 런: {img['run_index']})")
         except Exception as e:
             print(f"이미지 {img_num} 처리 중 오류 발생: {str(e)}")
             continue
@@ -212,7 +253,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                     "sent_id": blank_sent_id,
                     "level": 0,
                     "markers": [],
-                    "position": para_idx,
+                    "position": para_idx * 1000 + seg_idx * 100,  # 단락 내 세그먼트 순서
                     "insert_before": False
                 })
 
@@ -238,7 +279,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                         "sent_id": sent_id,
                         "level": 0,
                         "markers": [marker],
-                        "position": para_idx,
+                        "position": para_idx * 1000 + seg_idx * 100 + 50,  # 페이지 마커는 세그먼트보다 먼저
                         "insert_before": True
                     })
 
@@ -275,7 +316,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                         6 if style_name.startswith('heading 6') or style_name == '제목 6' else
                         0,
                 "markers": markers,
-                "position": para_idx,
+                "position": para_idx * 1000 + seg_idx * 100 + 100,  # 텍스트는 세그먼트 내에서 마지막
                 "insert_before": False
             })
     
@@ -298,8 +339,30 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             table_data = {
                 "rows": [],
                 "cols": [],
-                "cells": []
+                "cells": [],
+                "images": []  # 표 안의 이미지 정보 추가
             }
+            
+            # 표 안의 이미지 찾기 (원본 images 변수 사용)
+            table_images = []
+            all_images = find_all_images(document)  # 모든 이미지 다시 가져오기
+            for img in all_images:
+                # 이미지가 이 표 안에 있는지 확인
+                is_in_this_table = False
+                current_element = img['paragraph']._element
+                while current_element.getparent() is not None:
+                    parent = current_element.getparent()
+                    if parent == table._element:  # 이 표의 요소인지 확인
+                        is_in_this_table = True
+                        break
+                    elif parent.tag.endswith('tbl'):  # 다른 표에 속한 경우
+                        break
+                    current_element = parent
+                
+                if is_in_this_table:
+                    table_images.append(img)
+            
+            print(f"표 {table_idx} 안에 {len(table_images)}개의 이미지 발견")
             
             # 행과 열 정보 추출
             for row_idx, row in enumerate(table.rows):
@@ -307,6 +370,20 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                 for col_idx, cell in enumerate(row.cells):
                     cell_text = " ".join(para.text for para in cell.paragraphs)
                     row_data.append(cell_text)
+                    
+                    # 셀 안의 이미지 찾기
+                    cell_images = []
+                    for img in table_images:
+                        # 이미지가 이 셀 안에 있는지 확인
+                        current_element = img['paragraph']._element
+                        while current_element.getparent() is not None:
+                            parent = current_element.getparent()
+                            if parent == cell._element:  # 이 셀의 요소인지 확인
+                                cell_images.append(img)
+                                break
+                            elif parent.tag.endswith('tc'):  # 다른 셀에 속한 경우
+                                break
+                            current_element = parent
                     
                     # 셀 병합 정보 확인
                     rowspan = 1
@@ -344,14 +421,15 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                         elif cell._tc.hMerge == 'continue':
                             continue
                     
-                    # 셀 정보 저장
+                    # 셀 정보 저장 (이미지 정보 포함)
                     table_data["cells"].append({
                         "row": row_idx,
                         "col": col_idx,
                         "text": cell_text,
                         "is_merged": is_merged_cell,
                         "rowspan": rowspan,
-                        "colspan": colspan
+                        "colspan": colspan,
+                        "images": cell_images  # 셀 안의 이미지들
                     })
                 
                 table_data["rows"].append(row_data)
@@ -365,44 +443,34 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                         col_data.append(cell_text)
                 table_data["cols"].append(col_data)
             
-            # 표의 실제 위치를 찾기
-            table_position_body = len(document.paragraphs)
-            try:
-                body_element = document._element.body
-                all_elements = list(body_element.iterchildren())
-                
-                table_element_index = -1
-                for idx, element in enumerate(all_elements):
-                    if element is table._element:
-                        table_element_index = idx
-                        break
-                        
-                if table_element_index != -1:
-                    paragraph_count_before_table = 0
-                    for idx in range(table_element_index):
-                        element = all_elements[idx]
-                        if element.tag.endswith('p'):
-                            paragraph_count_before_table += 1
+            # 표의 실제 위치를 찾기 - 단락 기반으로 계산하여 통일
+            table_position_body = get_absolute_position(table._element)
+            
+            # 표가 어느 단락 다음에 오는지 찾아서 단락 기반 위치 계산
+            table_document_position = 0
+            
+            # body_children에서 표의 위치를 찾고, 그 이전의 단락들을 확인
+            for i, child in enumerate(body_children):
+                if child == table._element:
+                    # 표 이전의 단락들을 확인하여 가장 큰 단락 인덱스 찾기
+                    max_para_before_table = -1
+                    for j in range(i):
+                        if body_children[j].tag.endswith('p'):  # 단락인 경우
+                            # 이 단락이 몇 번째 단락인지 찾기
+                            for para_idx, para in enumerate(document.paragraphs):
+                                if para._element == body_children[j]:
+                                    max_para_before_table = max(max_para_before_table, para_idx)
+                                    break
                     
-                    table_position_body = paragraph_count_before_table
-                    print(f"표 {table_idx} 정확한 위치 발견: {table_position_body}")
-                else:
-                    for para_idx, para in enumerate(document.paragraphs):
-                        para_text = para.text.strip()
-                        if re.search(r'\[?표\s*\d+\.?\d*\]?', para_text, re.IGNORECASE):
-                            table_position_body = para_idx + 0.5
-                            print(f"표 {table_idx} 제목 패턴 위치 발견: {para_idx + 0.5}")
-                            break
-                    
-                    if table_position_body == len(document.paragraphs):
-                        table_position_body = len(document.paragraphs) - 1
-                        print(f"표 {table_idx} 마지막 위치 사용: {table_position_body}")
-                
-                print(f"표 {table_idx} 최종 위치: {table_position_body}")
-                    
-            except Exception as e:
-                print(f"표 위치 계산 중 오류: {e}")
-                table_position_body = len(document.paragraphs) - 1
+                    # 표의 위치를 가장 큰 단락 인덱스 + 1로 설정 (단락과 같은 스케일)
+                    if max_para_before_table >= 0:
+                        table_document_position = (max_para_before_table + 1) * 1000
+                    else:
+                        # 단락을 찾지 못한 경우 기본값 사용
+                        table_document_position = table_position_body * 1000
+                    break
+            
+            print(f"표 {table_idx} 절대 위치: {table_position_body}, 문서 위치: {table_document_position}")
             
             table_title = f"표 {table_idx}"
             
@@ -414,24 +482,26 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                 "sent_id": sent_id,
                 "level": 0,
                 "markers": [],
-                "position": table_position_body,
+                "position": table_document_position,
                 "insert_before": False,
                 "title": table_title,
                 "table_number": table_idx,
                 "text": table_title
             })
             
-            print(f"표 {table_idx} 처리 완료: {len(table_data['rows'])}행 x {len(table_data['cols'])}열, 위치: {table_position_body}")
+            print(f"표 {table_idx} 처리 완료: {len(table_data['rows'])}행 x {len(table_data['cols'])}열, 문서 위치: {table_document_position}")
     else:
         print("문서에 표가 없습니다.")
 
     # 메모리 정리
     gc.collect()
 
-    # 콘텐츠를 위치에 따라 정렬
-    content_structure.sort(key=lambda x: (x["position"], 
-                                         x.get("image_number", float('inf')) if x["type"] == "image" else 0, 
-                                         not x["insert_before"]))
+    # 콘텐츠를 위치에 따라 정렬 - 이미지와 텍스트의 정확한 순서 보장
+    content_structure.sort(key=lambda x: (
+        x["position"],  # 기본 위치 (단락 순서)
+        x.get("run_index", 0) if x["type"] == "image" else 0,  # 이미지의 경우 런 인덱스 고려
+        not x["insert_before"]  # insert_before가 False인 요소가 나중에
+    ))
 
     print(f"총 {len(content_structure)}개의 구조 요소 분석 완료.")
 
@@ -650,17 +720,56 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                         if cell_info["colspan"] > 1:
                             cell_elem.set("colspan", str(cell_info["colspan"]))
                     
-                    # 셀 내용 추가: sent/w 태그 없이 <p> 바로 텍스트를 넣음
+                    # 셀 내용 추가: 텍스트와 이미지 모두 처리
                     p = etree.SubElement(
                         cell_elem,
                         "p",
                         id=f"table_{item['id']}_cell_{row_idx}_{col_idx}",
                         smilref=f"dtbook.smil#smil_par_{item['id']}_cell_{row_idx}_{col_idx}"
                     )
-                    # br 태그가 포함된 경우 실제 br 요소로 생성
+                    
+                    # 셀 안의 이미지가 있는지 확인
+                    cell_info = next((cell for cell in table_data["cells"] 
+                                    if cell["row"] == row_idx and cell["col"] == col_idx), None)
+                    
+                    if cell_info and cell_info.get("images"):
+                        # 이미지가 있는 경우 이미지 먼저 추가
+                        for img_idx, img in enumerate(cell_info["images"]):
+                            # 이미지 파일 저장
+                            image_counter += 1
+                            img_num = str(image_counter)
+                            image_ext = ".jpeg"
+                            try:
+                                if 'image_rid' in img:
+                                    rel = document.part.rels[img['image_rid']]
+                                    if hasattr(rel, 'target_ref'):
+                                        ext = os.path.splitext(rel.target_ref)[1]
+                                        if ext:
+                                            image_ext = ext
+                            except:
+                                pass
+                            
+                            image_filename = f"table_{item['id']}_cell_{row_idx}_{col_idx}_img_{img_idx}{image_ext}"
+                            image_path = os.path.join(output_dir, image_filename)
+                            
+                            # 이미지 데이터 저장
+                            with open(image_path, "wb") as img_file:
+                                img_file.write(img['image_data'])
+                            
+                            # 이미지 요소 생성
+                            img_elem = etree.SubElement(p, "img",
+                                                       src=image_filename,
+                                                       alt=f"표 {item['table_number']} 셀 이미지 {img_idx+1}")
+                            img_elem.set("width", "100%")
+                            img_elem.set("height", "auto")
+                            
+                            # 이미지 다음에 줄바꿈 추가
+                            br_elem = etree.SubElement(p, "br")
+                    
+                    # 텍스트 추가
                     if cell_text.strip() == "<br/>":
                         br_elem = etree.SubElement(p, "br")
-                    else:
+                    elif cell_text.strip():
                         p.text = cell_text.strip()
         elif item["type"].startswith("h"):
             level = int(item["type"][1])  # h1 -> 1, h2 -> 2, h3 -> 3, h4 -> 4, h5 -> 5, h6 -> 6
@@ -905,6 +1014,46 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                              href=item["src"],
                              id=image_id,
                              **{"media-type": mime_type})
+    
+    # 표 안의 이미지 파일들도 매니페스트에 추가
+    for item in content_structure:
+        if item["type"] == "table":
+            table_data = item["table_data"]
+            for cell in table_data["cells"]:
+                if cell.get("images"):
+                    for img_idx, img in enumerate(cell["images"]):
+                        # 이미지 파일명 생성 (표 처리 시와 동일한 방식)
+                        image_ext = ".jpeg"
+                        try:
+                            if 'image_rid' in img:
+                                rel = document.part.rels[img['image_rid']]
+                                if hasattr(rel, 'target_ref'):
+                                    ext = os.path.splitext(rel.target_ref)[1]
+                                    if ext:
+                                        image_ext = ext
+                        except:
+                            pass
+                        
+                        image_filename = f"table_{item['id']}_cell_{cell['row']}_{cell['col']}_img_{img_idx}{image_ext}"
+                        image_id = f"img_table_{item['id']}_cell_{cell['row']}_{cell['col']}_{img_idx}"
+                        extension = os.path.splitext(image_filename)[1][1:].lower()
+
+                        # 이미지 확장자에 따른 MIME 타입 설정
+                        mime_type = {
+                            'jpg': 'image/jpeg',
+                            'jpeg': 'image/jpeg',
+                            'png': 'image/png',
+                            'gif': 'image/gif',
+                            'bmp': 'image/bmp',
+                            'tiff': 'image/tiff',
+                            'tif': 'image/tiff'
+                        }.get(extension, f'image/{extension}')
+
+                        print(f"표 안 이미지 매니페스트 추가: {image_filename} (MIME: {mime_type})")
+                        etree.SubElement(manifest, "item",
+                                         href=image_filename,
+                                         id=image_id,
+                                         **{"media-type": mime_type})
 
     # OPF 파일 저장
     opf_filepath = os.path.join(output_dir, "dtbook.opf")
