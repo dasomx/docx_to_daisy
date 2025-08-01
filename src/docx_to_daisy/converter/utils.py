@@ -15,6 +15,13 @@ import gc
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# 컴파일된 정규식 패턴들 (성능 최적화)
+BR_PATTERN = re.compile(r'<br\s*/?>', flags=re.IGNORECASE)
+HTML_TAG_PATTERN = re.compile(r'<[^>]*>')
+PUNCTUATION_PATTERN = re.compile(r'[.。,，!！?？:：;；]')
+BRACKET_PATTERN = re.compile(r'\[(.*?)\]')
+TABLE_TITLE_PATTERN = re.compile(r'\[?표\s*\d+\.?\d*\]?', re.IGNORECASE)
+
 
 def html_escape(text):
     """HTML 특수 문자를 이스케이프하고 HTML 태그를 제거하는 함수
@@ -29,10 +36,7 @@ def html_escape(text):
         return str(text)
 
     # HTML 태그 제거
-    import re
-    # HTML 태그 패턴 (시작 태그, 종료 태그, 자체 종료 태그 모두 포함)
-    html_tag_pattern = r'<[^>]*>'
-    cleaned_text = re.sub(html_tag_pattern, '', text)
+    cleaned_text = HTML_TAG_PATTERN.sub('', text)
 
     # HTML 특수 문자 이스케이프
     escaped = html.escape(cleaned_text, quote=True)
@@ -57,7 +61,7 @@ def split_text_to_words(text):
         list: 분리된 단어들의 리스트
     """
     # <br/> 태그 제거
-    text = text.replace('<br/>', ' ')
+    text = BR_PATTERN.sub(' ', text)
     
     # 문장 부호 패턴 정의
     punctuation_pattern = r'[.。,，!！?？:：;；]'
@@ -68,15 +72,16 @@ def split_text_to_words(text):
     result = []
     for word in words:
         # 2. 각 단어에서 문장 부호가 있는지 확인
-        if re.search(punctuation_pattern, word):
+        if PUNCTUATION_PATTERN.search(word):
             # 문장 부호가 단어 중간에 있는 경우는 그대로 유지
-            if not re.match(f'^{punctuation_pattern}', word) and not re.search(f'{punctuation_pattern}$', word):
+            if not PUNCTUATION_PATTERN.match(word) and not PUNCTUATION_PATTERN.search(word + '$'):
                 result.append(word)
                 continue
 
             # 문장 부호로 시작하는 경우
-            if re.match(f'^{punctuation_pattern}', word):
-                punct = re.match(f'^({punctuation_pattern}+)', word).group(1)
+            match = PUNCTUATION_PATTERN.match(word)
+            if match:
+                punct = match.group(0)
                 remaining = word[len(punct):]
                 if punct:
                     result.append(punct)
@@ -85,9 +90,9 @@ def split_text_to_words(text):
                 continue
 
             # 문장 부호로 끝나는 경우
-            if re.search(f'{punctuation_pattern}$', word):
-                match = re.search(f'({punctuation_pattern}+)$', word)
-                punct = match.group(1)
+            match = PUNCTUATION_PATTERN.search(word)
+            if match:
+                punct = match.group(0)
                 text_part = word[:-len(punct)]
                 if text_part:
                     result.append(text_part + punct)  # 문장 부호를 단어에 붙임
@@ -182,8 +187,7 @@ def analyze_image_context(document, image_info, window_size=2):
     
     # 이미지 설명 패턴 찾기
     # 1. 대괄호로 둘러싸인 텍스트 찾기
-    bracket_pattern = r'\[(.*?)\]'
-    bracket_matches = re.finditer(bracket_pattern, current_para_text)
+    bracket_matches = BRACKET_PATTERN.finditer(current_para_text)
     
     # 2. 이미지 관련 키워드 찾기
     image_keywords = ['그림', '사진', '이미지', 'QR', '코드', '차트', '표', '다이어그램']
@@ -203,7 +207,7 @@ def analyze_image_context(document, image_info, window_size=2):
     
     # 이전 단락들에서 찾기
     for idx, prev_text in enumerate(previous_paras):
-        for match in re.finditer(bracket_pattern, prev_text):
+        for match in BRACKET_PATTERN.finditer(prev_text):
             text = match.group(1)
             if any(keyword in text for keyword in image_keywords):
                 candidates.append({
@@ -214,7 +218,7 @@ def analyze_image_context(document, image_info, window_size=2):
     
     # 이후 단락들에서 찾기
     for idx, next_text in enumerate(next_paras):
-        for match in re.finditer(bracket_pattern, next_text):
+        for match in BRACKET_PATTERN.finditer(next_text):
             text = match.group(1)
             if any(keyword in text for keyword in image_keywords):
                 candidates.append({

@@ -6,11 +6,12 @@ import re
 import logging
 import html
 from docx import Document  # python-docx 라이브러리
+from docx.oxml.ns import qn  # XML 네임스페이스 처리
 from lxml import etree  # lxml 라이브러리
 from datetime import datetime
 from docx_to_daisy.markers import MarkerProcessor  # 마커 처리기 임포트
 import gc
-from docx_to_daisy.converter.utils import find_all_images, split_text_to_words, analyze_image_context, html_escape
+from docx_to_daisy.converter.utils import find_all_images, split_text_to_words, analyze_image_context, html_escape, BR_PATTERN, TABLE_TITLE_PATTERN
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
@@ -91,18 +92,60 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     # 이미지 관련 정보 저장 변수
     image_info = {}  # 이미지 번호 -> {제목, 설명, 위치} 매핑
     
-    # 0. 문서 body child 순서를 맵으로 생성하여 실제 위치 사용
-    body_children = list(document._element.body.iterchildren())
-    element_index = {id(child): idx for idx, child in enumerate(body_children)}
+    # --- 포함관계 인덱싱/캐싱 구조 추가 ---
+    # 1. 단락, 표, 셀의 id를 key로 하여 포함관계, 인덱스, 부모 정보를 dict로 저장
+    paragraph_id_map = {}
+    table_id_map = {}
+    cell_id_map = {}
+    element_parent_map = {}
+    element_type_map = {}
+    
+    # 단락 인덱싱
+    for para_idx, para in enumerate(document.paragraphs):
+        pid = id(para._element)
+        paragraph_id_map[pid] = {
+            'index': para_idx,
+            'object': para,
+            'parent': para._element.getparent()
+        }
+        element_type_map[pid] = 'paragraph'
+        element_parent_map[pid] = para._element.getparent()
+    # 표 인덱싱
+    for table_idx, table in enumerate(document.tables):
+        tid = id(table._element)
+        table_id_map[tid] = {
+            'index': table_idx,
+            'object': table,
+            'parent': table._element.getparent()
+        }
+        element_type_map[tid] = 'table'
+        element_parent_map[tid] = table._element.getparent()
+        # 셀 인덱싱 (표 내부)
+        for row in table.rows:
+            for cell in row.cells:
+                cid = id(cell._element)
+                cell_id_map[cid] = {
+                    'object': cell,
+                    'parent': cell._element.getparent(),
+                    'table_id': tid
+                }
+                element_type_map[cid] = 'cell'
+                element_parent_map[cid] = cell._element.getparent()
 
-    # 절대 위치 계산 함수 정의
-    def get_absolute_position(element):
-        """요소의 절대적인 순서를 반환"""
-        try:
-            return body_children.index(element)
-        except ValueError:
-            # 요소를 찾을 수 없는 경우 기본값 반환
-            return len(body_children)
+    # 2. 이미지가 어느 표/셀/단락에 속하는지 O(1)로 판별할 수 있도록 parent chain을 미리 저장
+    def get_ancestor_type_and_id(element):
+        """element의 조상 중 table/cell/paragraph를 찾아 반환"""
+        current = element
+        while current is not None:
+            cid = id(current)
+            if cid in cell_id_map:
+                return ('cell', cid)
+            if cid in table_id_map:
+                return ('table', cid)
+            if cid in paragraph_id_map:
+                return ('paragraph', cid)
+            current = current.getparent() if hasattr(current, 'getparent') else None
+        return (None, None)
 
     # 이미지의 실제 문서 내 위치를 계산하는 함수
     def get_image_document_position(para_idx, run_idx):
@@ -116,41 +159,54 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
         
         return base_position + run_position
 
-    # 1. 문서에서 모든 이미지 찾기 (표 밖의 이미지만)
+    # 병합된 영역에 속하는지 확인하는 함수
+    def is_in_merged_area(row_idx, col_idx, table_data, cell_merge_info, table_id):
+        """현재 위치가 다른 셀의 병합 영역에 속하는지 확인합니다."""
+        # 해당 위치의 셀 정보 찾기
+        for cell in table_data["cells"]:
+            if cell["row"] == row_idx and cell["col"] == col_idx:
+                # 병합 정보에서 확인
+                cid = cell.get("cell_id")
+                if cid and table_id in cell_merge_info and cid in cell_merge_info[table_id]:
+                    merge_info = cell_merge_info[table_id][cid]
+                    # 병합 영역에 속하지만 시작점이 아닌 경우
+                    return merge_info.get('is_merged_area', False)
+        
+        return False
+
+    # 1. 문서에서 모든 이미지 찾기 (표 안/밖 분류)
     print("문서에서 이미지 찾는 중...")
     images = find_all_images(document)
     print(f"총 {len(images)}개의 이미지 발견")
 
-    # 표 밖의 이미지만 필터링
+    # 표 안/밖 이미지 분류
     standalone_images = []
+    table_images = []
+    cell_images = []
     for img in images:
-        # 이미지가 표 안에 있는지 확인
-        is_in_table = False
-        current_element = img['paragraph']._element
-        while current_element.getparent() is not None:
-            parent = current_element.getparent()
-            if parent.tag.endswith('tbl'):  # 표 요소인지 확인
-                is_in_table = True
-                break
-            current_element = parent
-        
-        if not is_in_table:
+        # 이미지가 속한 최상위 조상 타입/ID 판별
+        ancestor_type, ancestor_id = get_ancestor_type_and_id(img['paragraph']._element)
+        img['ancestor_type'] = ancestor_type
+        img['ancestor_id'] = ancestor_id
+        if ancestor_type == 'cell':
+            cell_images.append(img)
+        elif ancestor_type == 'table':
+            table_images.append(img)
+        else:
             standalone_images.append(img)
-
     print(f"표 밖의 이미지: {len(standalone_images)}개")
-    print(f"표 안의 이미지: {len(images) - len(standalone_images)}개")
+    print(f"표 안의 이미지: {len(table_images)}개, 셀 안의 이미지: {len(cell_images)}개")
     
-    # 2. 문서에서 모든 이미지 추출
-    print(f"문서에서 이미지 추출 중...")
+    # 2. 문서에서 모든 이미지 관계 미리 수집 (성능 최적화)
+    print(f"문서에서 이미지 관계 수집 중...")
     image_counter = 0
-    image_relations = []
+    image_relations = {}
     
-    # 모든 이미지 관계 수집
+    # 모든 이미지 관계를 딕셔너리로 미리 수집 (O(1) 접근)
     for rel_id, rel in document.part.rels.items():
         if "image" in rel.reltype:
             try:
-                # 이미지 관계 정보 저장
-                image_relations.append(rel)
+                image_relations[rel_id] = rel
                 print(f"이미지 관계 발견: {rel_id}, {rel.reltype}")
             except Exception as e:
                 print(f"이미지 관계 처리 오류: {str(e)}")
@@ -176,8 +232,8 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             image_ext = ".jpeg"
             try:
                 if 'image_rid' in img:
-                    rel = document.part.rels[img['image_rid']]
-                    if hasattr(rel, 'target_ref'):
+                    rel = image_relations.get(img['image_rid'])  # 미리 수집한 관계 사용
+                    if rel and hasattr(rel, 'target_ref'):
                         ext = os.path.splitext(rel.target_ref)[1]
                         if ext:
                             image_ext = ext
@@ -215,8 +271,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
 
     print(f"{image_counter}개 이미지 추출 완료.")
 
-    # 메모리 정리
-    del images
+    # 메모리 정리 (images는 표 처리에서도 사용하므로 유지)
     del image_relations
     del image_mapping
     gc.collect()
@@ -234,8 +289,8 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
         text_raw = para.text
         style_name = para.style.name.lower()
 
-        # <br/> 태그 기준으로 세그먼트를 분리
-        br_segments = re.split(r'<br\s*/?>', text_raw, flags=re.IGNORECASE)
+        # <br/> 태그 기준으로 세그먼트를 분리 (성능 최적화)
+        br_segments = BR_PATTERN.split(text_raw)
 
         # 세그먼트별 처리
         for seg_idx, seg_text in enumerate(br_segments):
@@ -265,27 +320,27 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             processed_text, markers = MarkerProcessor.process_text(seg_text.strip())
 
             # 페이지 마커가 있는 경우 먼저 처리
-            for marker in markers:
-                if marker.type == "page":
-                    element_counter += 1
-                    sent_counter += 1
-                    elem_id = f"page_{element_counter}"
-                    sent_id = f"sent_{sent_counter}"
-                    content_structure.append({
-                        "type": "pagenum",
-                        "text": marker.value,
-                        "words": [marker.value],
-                        "id": elem_id,
-                        "sent_id": sent_id,
-                        "level": 0,
-                        "markers": [marker],
-                        "position": para_idx * 1000 + seg_idx * 100 + 50,  # 페이지 마커는 세그먼트보다 먼저
-                        "insert_before": True
-                    })
+            page_markers = [marker for marker in markers if marker.type == "page"]
+            for marker in page_markers:
+                element_counter += 1
+                sent_counter += 1
+                elem_id = f"page_{element_counter}"
+                sent_id = f"sent_{sent_counter}"
+                content_structure.append({
+                    "type": "pagenum",
+                    "text": marker.value,
+                    "words": [marker.value],
+                    "id": elem_id,
+                    "sent_id": sent_id,
+                    "level": 0,
+                    "markers": [marker],
+                    "position": para_idx * 1000 + seg_idx * 100 + 50,  # 페이지 마커는 세그먼트보다 먼저
+                    "insert_before": True
+                })
 
-                    # 마커만 있고 실제 내용이 없는 경우 건너뜀
-                    if not processed_text.strip():
-                        continue
+                # 마커만 있고 실제 내용이 없는 경우 건너뜀
+                if not processed_text.strip():
+                    continue
 
             element_counter += 1
             sent_counter += 1
@@ -295,26 +350,37 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             # 단어 분리
             words = split_text_to_words(processed_text)
 
+            # 스타일 이름에 따른 구조 매핑 (미리 계산)
+            element_type = "p"
+            element_level = 0
+            
+            if style_name.startswith('heading 1') or style_name == '제목 1':
+                element_type = "h1"
+                element_level = 1
+            elif style_name.startswith('heading 2') or style_name == '제목 2':
+                element_type = "h2"
+                element_level = 2
+            elif style_name.startswith('heading 3') or style_name == '제목 3':
+                element_type = "h3"
+                element_level = 3
+            elif style_name.startswith('heading 4') or style_name == '제목 4':
+                element_type = "h4"
+                element_level = 4
+            elif style_name.startswith('heading 5') or style_name == '제목 5':
+                element_type = "h5"
+                element_level = 5
+            elif style_name.startswith('heading 6') or style_name == '제목 6':
+                element_type = "h6"
+                element_level = 6
+
             # 스타일 이름에 따른 구조 매핑
             content_structure.append({
-                "type": "h1" if style_name.startswith('heading 1') or style_name == '제목 1' else
-                "h2" if style_name.startswith('heading 2') or style_name == '제목 2' else
-                "h3" if style_name.startswith('heading 3') or style_name == '제목 3' else
-                "h4" if style_name.startswith('heading 4') or style_name == '제목 4' else
-                "h5" if style_name.startswith('heading 5') or style_name == '제목 5' else
-                "h6" if style_name.startswith('heading 6') or style_name == '제목 6' else
-                "p",
+                "type": element_type,
                 "text": processed_text,
                 "words": words,
                 "id": elem_id,
                 "sent_id": sent_id,
-                "level": 1 if style_name.startswith('heading 1') or style_name == '제목 1' else
-                        2 if style_name.startswith('heading 2') or style_name == '제목 2' else
-                        3 if style_name.startswith('heading 3') or style_name == '제목 3' else
-                        4 if style_name.startswith('heading 4') or style_name == '제목 4' else
-                        5 if style_name.startswith('heading 5') or style_name == '제목 5' else
-                        6 if style_name.startswith('heading 6') or style_name == '제목 6' else
-                        0,
+                "level": element_level,
                 "markers": markers,
                 "position": para_idx * 1000 + seg_idx * 100 + 100,  # 텍스트는 세그먼트 내에서 마지막
                 "insert_before": False
@@ -325,8 +391,101 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     # 표 처리
     print("표 처리 중...")
     
+    # body_children에서 모든 요소의 위치를 미리 계산 (성능 최적화)
+    body_children = list(document._element.body.iterchildren())
+    element_positions = {}
+    
+    # 모든 요소의 위치를 미리 계산
+    for idx, child in enumerate(body_children):
+        child_id = id(child)
+        element_positions[child_id] = idx
+    
+    # 단락 인덱스 매핑을 미리 계산 (성능 최적화)
+    paragraph_index_map = {}
+    for para_idx, para in enumerate(document.paragraphs):
+        para_id = id(para._element)
+        paragraph_index_map[para_id] = para_idx
+    
     if len(document.tables) > 0:
         print(f"문서에 {len(document.tables)}개의 표 발견")
+        
+        # 셀 병합 정보 미리 계산 (성능 최적화)
+        cell_merge_info = {}
+        for table_idx, table in enumerate(document.tables):
+            tid = id(table._element)
+            cell_merge_info[tid] = {}
+            
+            # 병합된 영역을 추적하기 위한 그리드
+            merged_areas = set()
+            
+            for row_idx, row in enumerate(table.rows):
+                for col_idx, cell in enumerate(row.cells):
+                    cid = id(cell._element)
+                    
+                    # 이미 병합된 영역에 속한 셀인지 확인
+                    if (row_idx, col_idx) in merged_areas:
+                        # 이 셀은 다른 셀의 병합 영역에 속하므로 건너뛰기
+                        cell_merge_info[tid][cid] = {
+                            'rowspan': 1,
+                            'colspan': 1,
+                            'is_merged': False,
+                            'is_merged_area': True  # 병합 영역에 속함을 표시
+                        }
+                        continue
+                    
+                    # 세로 병합 정보 계산
+                    rowspan = 1
+                    colspan = 1
+                    is_merged_cell = False
+                    
+                    # 가로 병합(gridSpan) 확인 - Word XML에서 직접 읽기
+                    try:
+                        tc_pr = cell._tc.get_or_add_tcPr()
+                        grid_span = tc_pr.find(qn('w:gridSpan'))
+                        if grid_span is not None and grid_span.get(qn('w:val')):
+                            colspan = int(grid_span.get(qn('w:val')))
+                            if colspan > 1:
+                                is_merged_cell = True
+                                # 병합된 영역 표시
+                                for c in range(col_idx + 1, col_idx + colspan):
+                                    merged_areas.add((row_idx, c))
+                    except Exception as e:
+                        print(f"gridSpan 읽기 오류: {e}")
+                    
+                    # 세로 병합(vMerge) 확인
+                    if hasattr(cell, '_tc') and hasattr(cell._tc, 'vMerge'):
+                        if cell._tc.vMerge == 'restart':
+                            is_merged_cell = True
+                            # 아래쪽으로 병합된 셀 개수 계산
+                            for next_row_idx in range(row_idx + 1, len(table.rows)):
+                                if col_idx < len(table.rows[next_row_idx].cells):
+                                    next_cell = table.rows[next_row_idx].cells[col_idx]
+                                    if (hasattr(next_cell, '_tc') and hasattr(next_cell._tc, 'vMerge') and 
+                                        next_cell._tc.vMerge == 'continue'):
+                                        rowspan += 1
+                                        # 병합된 영역 표시 (colspan도 고려)
+                                        for c in range(col_idx, col_idx + colspan):
+                                            merged_areas.add((next_row_idx, c))
+                                    else:
+                                        break
+                                else:
+                                    break
+                        elif cell._tc.vMerge == 'continue':
+                            # 이 셀은 위의 셀에 병합됨
+                            cell_merge_info[tid][cid] = {
+                                'rowspan': 1,
+                                'colspan': 1,
+                                'is_merged': False,
+                                'is_merged_area': True  # 병합 영역에 속함을 표시
+                            }
+                            continue
+                    
+                    cell_merge_info[tid][cid] = {
+                        'rowspan': rowspan,
+                        'colspan': colspan,
+                        'is_merged': is_merged_cell,
+                        'is_merged_area': False  # 병합의 시작점
+                    }
         
         for table_idx, table in enumerate(document.tables, 1):
             print(f"표 {table_idx} 처리 중...")
@@ -343,26 +502,14 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                 "images": []  # 표 안의 이미지 정보 추가
             }
             
-            # 표 안의 이미지 찾기 (원본 images 변수 사용)
-            table_images = []
-            all_images = find_all_images(document)  # 모든 이미지 다시 가져오기
-            for img in all_images:
-                # 이미지가 이 표 안에 있는지 확인
-                is_in_this_table = False
-                current_element = img['paragraph']._element
-                while current_element.getparent() is not None:
-                    parent = current_element.getparent()
-                    if parent == table._element:  # 이 표의 요소인지 확인
-                        is_in_this_table = True
-                        break
-                    elif parent.tag.endswith('tbl'):  # 다른 표에 속한 경우
-                        break
-                    current_element = parent
-                
-                if is_in_this_table:
-                    table_images.append(img)
+            # 표 안의 이미지 찾기 (인덱싱 구조 활용)
+            tid = id(table._element)
+            this_table_images = []
+            for img in table_images + cell_images:
+                if img['ancestor_id'] == tid:
+                    this_table_images.append(img)
             
-            print(f"표 {table_idx} 안에 {len(table_images)}개의 이미지 발견")
+            print(f"표 {table_idx} 안에 {len(this_table_images)}개의 이미지 발견")
             
             # 행과 열 정보 추출
             for row_idx, row in enumerate(table.rows):
@@ -371,65 +518,32 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                     cell_text = " ".join(para.text for para in cell.paragraphs)
                     row_data.append(cell_text)
                     
-                    # 셀 안의 이미지 찾기
-                    cell_images = []
-                    for img in table_images:
-                        # 이미지가 이 셀 안에 있는지 확인
-                        current_element = img['paragraph']._element
-                        while current_element.getparent() is not None:
-                            parent = current_element.getparent()
-                            if parent == cell._element:  # 이 셀의 요소인지 확인
-                                cell_images.append(img)
-                                break
-                            elif parent.tag.endswith('tc'):  # 다른 셀에 속한 경우
-                                break
-                            current_element = parent
+                    # 셀 안의 이미지 찾기 (인덱싱 구조 활용)
+                    cid = id(cell._element)
+                    cell_images_in_cell = []
+                    for img in cell_images:
+                        if img['ancestor_id'] == cid:
+                            cell_images_in_cell.append(img)
                     
-                    # 셀 병합 정보 확인
-                    rowspan = 1
-                    colspan = 1
-                    is_merged_cell = False
-                    
-                    if hasattr(cell, '_tc') and hasattr(cell._tc, 'vMerge'):
-                        if cell._tc.vMerge == 'restart':
-                            is_merged_cell = True
-                            for next_row_idx in range(row_idx + 1, len(table.rows)):
-                                if col_idx < len(table.rows[next_row_idx].cells):
-                                    next_cell = table.rows[next_row_idx].cells[col_idx]
-                                    if (hasattr(next_cell, '_tc') and hasattr(next_cell._tc, 'vMerge') and 
-                                        next_cell._tc.vMerge == 'continue'):
-                                        rowspan += 1
-                                    else:
-                                        break
-                                else:
-                                    break
-                        elif cell._tc.vMerge == 'continue':
-                            continue
-                    
-                    # 가로 병합 확인
-                    if hasattr(cell, '_tc') and hasattr(cell._tc, 'hMerge'):
-                        if cell._tc.hMerge == 'restart':
-                            is_merged_cell = True
-                            colspan = 1
-                            for next_col_idx in range(col_idx + 1, len(row.cells)):
-                                next_cell = row.cells[next_col_idx]
-                                if (hasattr(next_cell, '_tc') and hasattr(next_cell._tc, 'hMerge') and 
-                                    next_cell._tc.hMerge == 'continue'):
-                                    colspan += 1
-                                else:
-                                    break
-                        elif cell._tc.hMerge == 'continue':
-                            continue
+                    # 미리 계산된 셀 병합 정보 사용
+                    merge_info = cell_merge_info[tid].get(cid, {
+                        'rowspan': 1,
+                        'colspan': 1,
+                        'is_merged': False,
+                        'is_merged_area': False
+                    })
                     
                     # 셀 정보 저장 (이미지 정보 포함)
                     table_data["cells"].append({
                         "row": row_idx,
                         "col": col_idx,
                         "text": cell_text,
-                        "is_merged": is_merged_cell,
-                        "rowspan": rowspan,
-                        "colspan": colspan,
-                        "images": cell_images  # 셀 안의 이미지들
+                        "is_merged": merge_info['is_merged'],
+                        "rowspan": merge_info['rowspan'],
+                        "colspan": merge_info['colspan'],
+                        "is_merged_area": merge_info['is_merged_area'],
+                        "cell_id": cid,  # 셀 ID 추가
+                        "images": cell_images_in_cell  # 셀 안의 이미지들
                     })
                 
                 table_data["rows"].append(row_data)
@@ -443,34 +557,39 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                         col_data.append(cell_text)
                 table_data["cols"].append(col_data)
             
-            # 표의 실제 위치를 찾기 - 단락 기반으로 계산하여 통일
-            table_position_body = get_absolute_position(table._element)
-            
-            # 표가 어느 단락 다음에 오는지 찾아서 단락 기반 위치 계산
+            # 표 위치 계산 (개선된 로직)
             table_document_position = 0
+            tid = id(table._element)
+            table_body_index = element_positions.get(tid, -1)
             
-            # body_children에서 표의 위치를 찾고, 그 이전의 단락들을 확인
-            for i, child in enumerate(body_children):
-                if child == table._element:
-                    # 표 이전의 단락들을 확인하여 가장 큰 단락 인덱스 찾기
-                    max_para_before_table = -1
-                    for j in range(i):
-                        if body_children[j].tag.endswith('p'):  # 단락인 경우
-                            # 이 단락이 몇 번째 단락인지 찾기
-                            for para_idx, para in enumerate(document.paragraphs):
-                                if para._element == body_children[j]:
-                                    max_para_before_table = max(max_para_before_table, para_idx)
-                                    break
-                    
-                    # 표의 위치를 가장 큰 단락 인덱스 + 1로 설정 (단락과 같은 스케일)
-                    if max_para_before_table >= 0:
-                        table_document_position = (max_para_before_table + 1) * 1000
-                    else:
-                        # 단락을 찾지 못한 경우 기본값 사용
-                        table_document_position = table_position_body * 1000
-                    break
+            if table_body_index != -1:
+                # 표 이전의 단락들을 확인하여 가장 큰 단락 인덱스 찾기
+                max_para_before_table = -1
+                for idx in range(table_body_index):
+                    child = body_children[idx]
+                    if child.tag.endswith('p'):  # 단락인 경우
+                        # 미리 계산된 단락 인덱스 매핑 사용
+                        para_idx = paragraph_index_map.get(id(child), -1)
+                        if para_idx != -1:
+                            max_para_before_table = max(max_para_before_table, para_idx)
+                
+                # 표의 위치를 가장 큰 단락 인덱스 + 1로 설정
+                if max_para_before_table >= 0:
+                    # 단락과 동일한 스케일로 계산
+                    # 단락은 para_idx * 1000 + seg_idx * 100 + 100을 사용
+                    # 표는 단락 다음에 오므로 para_idx * 1000 + 500으로 설정
+                    table_document_position = (max_para_before_table + 1) * 1000 + 500
+                    print(f"표 {table_idx} 위치 계산: 단락 {max_para_before_table} 다음, 위치 {table_document_position}")
+                else:
+                    # 단락을 찾지 못한 경우 표의 body 내 위치 기반으로 설정
+                    table_document_position = table_body_index * 1000 + 500
+                    print(f"표 {table_idx} 위치 계산: 단락 없음, body 위치 {table_body_index}, 위치 {table_document_position}")
+            else:
+                # 표 요소를 찾지 못한 경우 표 인덱스 기반으로 설정
+                table_document_position = table_idx * 1000 + 500
+                print(f"표 {table_idx} 위치 계산: body 위치 없음, 표 인덱스 {table_idx}, 위치 {table_document_position}")
             
-            print(f"표 {table_idx} 절대 위치: {table_position_body}, 문서 위치: {table_document_position}")
+            print(f"표 {table_idx} 문서 위치: {table_document_position}")
             
             table_title = f"표 {table_idx}"
             
@@ -486,14 +605,35 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                 "insert_before": False,
                 "title": table_title,
                 "table_number": table_idx,
-                "text": table_title
+                "text": table_title,
+                "original_table_id": tid  # 원본 테이블 ID 추가
             })
             
             print(f"표 {table_idx} 처리 완료: {len(table_data['rows'])}행 x {len(table_data['cols'])}열, 문서 위치: {table_document_position}")
     else:
         print("문서에 표가 없습니다.")
 
-    # 메모리 정리
+    # 메모리 정리 (모든 처리 완료 후)
+    # 변수가 정의된 경우에만 삭제
+    if 'images' in locals():
+        del images
+    if 'table_images' in locals():
+        del table_images
+    if 'cell_images' in locals():
+        del cell_images
+    if 'cell_merge_info' in locals():
+        del cell_merge_info
+    if 'paragraph_id_map' in locals():
+        del paragraph_id_map
+    if 'table_id_map' in locals():
+        del table_id_map
+    if 'cell_id_map' in locals():
+        del cell_id_map
+    if 'element_parent_map' in locals():
+        del element_parent_map
+    if 'element_type_map' in locals():
+        del element_type_map
+    # image_relations는 DAISY 파일 생성에서 사용되므로 나중에 정리
     gc.collect()
 
     # 콘텐츠를 위치에 따라 정렬 - 이미지와 텍스트의 정확한 순서 보장
@@ -513,15 +653,21 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     # 페이지 카운터 초기화
     total_pages = 0
     max_page_number = 0
+    
+    # 모든 마커를 한 번에 수집하여 페이지 정보 계산
+    all_markers = []
     for item in content_structure:
-        for marker in item.get("markers", []):
-            if marker.type == "page":
-                total_pages += 1
-                try:
-                    page_num = int(marker.value)
-                    max_page_number = max(max_page_number, page_num)
-                except ValueError:
-                    pass
+        all_markers.extend(item.get("markers", []))
+    
+    page_markers = [marker for marker in all_markers if marker.type == "page"]
+    total_pages = len(page_markers)
+    
+    for marker in page_markers:
+        try:
+            page_num = int(marker.value)
+            max_page_number = max(max_page_number, page_num)
+        except ValueError:
+            pass
 
     dtbook_root = etree.Element(
         "{%s}dtbook" % dtbook_ns,
@@ -595,11 +741,17 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     current_level1 = None
     current_level = 0
 
+    # 계층 구조 관리를 위한 변수들
+    level_elements = {}  # 각 레벨별 현재 요소를 추적
+    current_level = 0
+    
     # 콘텐츠 추가
     for item in content_structure:
         if item["type"] == "pagenum":
+            # 페이지 번호는 현재 활성 레벨 요소에 추가
+            parent_elem = level_elements.get(current_level, dtbook_bodymatter)
             pagenum = etree.SubElement(
-                current_level1 if current_level1 is not None else dtbook_bodymatter,
+                parent_elem,
                 "pagenum",
                 id=f"page_{item['text']}_{item['text']}",
                 smilref=f"dtbook.smil#smil_par_page_{item['text']}_{item['text']}",
@@ -608,31 +760,28 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             pagenum.text = str(item["text"])
             continue
         elif item["type"] == "image":
-            if current_level1 is None:
+            # 이미지는 현재 활성 레벨 요소에 추가
+            parent_elem = level_elements.get(current_level, dtbook_bodymatter)
+            if parent_elem is dtbook_bodymatter:
                 # level1이 없는 경우 생성
-                current_level1 = etree.SubElement(dtbook_bodymatter, "level1",
-                                                id=item["id"],
-                                                smilref=f"dtbook.smil#smil_par_{item['id']}")
+                level1 = etree.SubElement(dtbook_bodymatter, "level1",
+                                        id=item["id"],
+                                        smilref=f"dtbook.smil#smil_par_{item['id']}")
+                h1 = etree.SubElement(level1, "h1")
+                h1.text = "제목 없음"
+                level_elements[1] = level1
                 current_level = 1
-                heading = etree.SubElement(current_level1, "h1")
-                heading.text = " ".join(item["words"])
+                parent_elem = level1
 
             # 이미지 그룹 생성
-            imggroup = etree.SubElement(
-                current_level1,
-                "imggroup",
-                id=item["id"],
-                class_="figure"
-            )
+            imggroup = etree.SubElement(parent_elem, "imggroup",
+                                      id=item["id"], class_="figure")
 
             # 이미지 요소 생성
-            img = etree.SubElement(
-                imggroup,
-                "img",
-                id=f"{item['id']}_img",
-                src=item["src"],
-                alt=item["alt_text"]
-            )
+            img = etree.SubElement(imggroup, "img",
+                                 id=f"{item['id']}_img",
+                                 src=item["src"],
+                                 alt=item["alt_text"])
             
             # 이미지 크기를 적절히 설정
             img.set("width", "100%")
@@ -640,44 +789,33 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             
             # 이미지 캡션 추가
             caption = etree.SubElement(imggroup, "caption",
-                                       id=f"{item['id']}_caption")
+                                     id=f"{item['id']}_caption")
             sent = etree.SubElement(caption, "sent",
-                                    id=item["sent_id"],
-                                    smilref=f"dtbook.smil#smil_par_{item['sent_id']}")
-            
-            # 이미지 제목만 캡션으로 설정
-            # w = etree.SubElement(sent, "w")
-            
-            # 제목 설정
-            # if "title" in item and item["title"]:
-            #     img_type = item.get("type", "그림")
-            #     w.text = f"{img_type} {item['id'].replace('id_', '')}: {item['title']}"
-            # else:
-            #     w.text = item["alt_text"]
-            
-            # 이미지 설명이 있을 경우에만 추가
-            # if "description" in item and item["description"]:
-            #     desc_p = etree.SubElement(caption, "p", class_="image-description")
-            #     desc_p.text = item["description"]
+                                  id=item["sent_id"],
+                                  smilref=f"dtbook.smil#smil_par_{item['sent_id']}")
             
             continue
         elif item["type"] == "table":
-            # 표 처리
-            if current_level1 is None:
+            # 표는 현재 활성 레벨 요소에 추가
+            parent_elem = level_elements.get(current_level, dtbook_bodymatter)
+            if parent_elem is dtbook_bodymatter:
                 # level1이 없는 경우 생성
-                current_level1 = etree.SubElement(dtbook_bodymatter, "level1",
-                                                id=item["id"],
-                                                smilref=f"dtbook.smil#smil_par_{item['id']}")
+                level1 = etree.SubElement(dtbook_bodymatter, "level1",
+                                        id=item["id"],
+                                        smilref=f"dtbook.smil#smil_par_{item['id']}")
+                h1 = etree.SubElement(level1, "h1")
+                h1.text = "제목 없음"
+                level_elements[1] = level1
                 current_level = 1
-                heading = etree.SubElement(current_level1, "h1")
-                heading.text = "제목 없음"
+                parent_elem = level1
             
-            # 표 요소 생성
-            table = etree.SubElement(current_level1, "table", 
-                                    id=item["id"],
-                                    class_="data-table",
-                                    smilref=f"dtbook.smil#smil_par_{item['id']}",
-                                    border="1")
+            # 표 요소 생성 (스타일 속성 추가)
+            table_elem = etree.SubElement(parent_elem, "table", 
+                                   id=item["id"],
+                                   class_="data-table",
+                                   smilref=f"dtbook.smil#smil_par_{item['id']}",
+                                   border="1",
+                                   style="width: 100%; border-collapse: collapse;")
             
             # 표 데이터 가져오기
             table_data = item["table_data"]
@@ -685,36 +823,43 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             # 표 번호 가져오기
             table_number = item.get("table_number", 1)  # 기본값 1로 설정
             
+            # 원본 테이블 ID 가져오기 (병합 정보 확인용)
+            original_table_id = item.get("original_table_id")
+            
             # tbody 요소 생성
-            tbody = etree.SubElement(table, "tbody")
+            tbody = etree.SubElement(table_elem, "tbody")
             
             # 표 데이터로 행과 열 생성
             for row_idx, row_data in enumerate(table_data["rows"]):
                 tr = etree.SubElement(tbody, "tr", 
-                                     id=f"forsmil-{element_counter+row_idx}",
-                                     smilref=f"dtbook.smil#smil_par_{item['id']}_cell_{row_idx}")
+                                    id=f"forsmil-{element_counter+row_idx}",
+                                    smilref=f"dtbook.smil#smil_par_{item['id']}_cell_{row_idx}",
+                                    style="border: 1px solid #000;")
                 
                 for col_idx, cell_text in enumerate(row_data):
                     # 셀 정보 찾기
                     cell_info = next((cell for cell in table_data["cells"] 
                                     if cell["row"] == row_idx and cell["col"] == col_idx), None)
                     
-                    # 병합된 셀의 경우 건너뛰기 (이미 처리됨)
-                    if cell_info and cell_info["is_merged"] and (cell_info["rowspan"] > 1 or cell_info["colspan"] > 1):
+                    # 병합된 영역에 속하는 셀인지 확인
+                    if cell_info and cell_info.get("is_merged_area", False):
+                        # 병합된 영역에 속하므로 건너뛰기
                         continue
                     
-                    # 셀 요소 생성
+                    # 셀 요소 생성 (스타일 속성 추가)
                     if col_idx == 0:
                         cell_elem = etree.SubElement(tr, "th", scope="row",
-                                                    id=f"forsmil-{element_counter+row_idx*10+col_idx}",
-                                                    smilref=f"dtbook.smil#smil_par_{item['id']}_cell_{row_idx}_{col_idx}")
+                                                   id=f"forsmil-{element_counter+row_idx*10+col_idx}",
+                                                   smilref=f"dtbook.smil#smil_par_{item['id']}_cell_{row_idx}_{col_idx}",
+                                                   style="text-align: left; vertical-align: middle; font-weight: normal;")
                     else:
                         cell_elem = etree.SubElement(tr, "td",
-                                                    id=f"forsmil-{element_counter+row_idx*10+col_idx}",
-                                                    smilref=f"dtbook.smil#smil_par_{item['id']}_cell_{row_idx}_{col_idx}")
+                                                   id=f"forsmil-{element_counter+row_idx*10+col_idx}",
+                                                   smilref=f"dtbook.smil#smil_par_{item['id']}_cell_{row_idx}_{col_idx}",
+                                                   style="text-align: left; vertical-align: middle; font-weight: normal;")
                     
-                    # 병합 속성 설정
-                    if cell_info:
+                    # 병합 속성 설정 (병합된 셀인 경우에만)
+                    if cell_info and cell_info["is_merged"]:
                         if cell_info["rowspan"] > 1:
                             cell_elem.set("rowspan", str(cell_info["rowspan"]))
                         if cell_info["colspan"] > 1:
@@ -725,7 +870,8 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                         cell_elem,
                         "p",
                         id=f"table_{item['id']}_cell_{row_idx}_{col_idx}",
-                        smilref=f"dtbook.smil#smil_par_{item['id']}_cell_{row_idx}_{col_idx}"
+                        smilref=f"dtbook.smil#smil_par_{item['id']}_cell_{row_idx}_{col_idx}",
+                        style="margin: 0; padding: 8px; text-align: left; vertical-align: middle; font-weight: normal;"
                     )
                     
                     # 셀 안의 이미지가 있는지 확인
@@ -741,8 +887,8 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                             image_ext = ".jpeg"
                             try:
                                 if 'image_rid' in img:
-                                    rel = document.part.rels[img['image_rid']]
-                                    if hasattr(rel, 'target_ref'):
+                                    rel = image_relations.get(img['image_rid'])  # 미리 수집한 관계 사용
+                                    if rel and hasattr(rel, 'target_ref'):
                                         ext = os.path.splitext(rel.target_ref)[1]
                                         if ext:
                                             image_ext = ext
@@ -758,8 +904,8 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                             
                             # 이미지 요소 생성
                             img_elem = etree.SubElement(p, "img",
-                                                       src=image_filename,
-                                                       alt=f"표 {item['table_number']} 셀 이미지 {img_idx+1}")
+                                                      src=image_filename,
+                                                      alt=f"표 {item['table_number']} 셀 이미지 {img_idx+1}")
                             img_elem.set("width", "100%")
                             img_elem.set("height", "auto")
                             
@@ -776,86 +922,87 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
 
             if level == 1:
                 # 새로운 level1 시작
-                current_level1 = etree.SubElement(dtbook_bodymatter, "level1",
-                                                id=item["id"],
-                                                smilref=f"dtbook.smil#smil_par_{item['id']}")
+                level1 = etree.SubElement(dtbook_bodymatter, "level1",
+                                        id=item["id"],
+                                        smilref=f"dtbook.smil#smil_par_{item['id']}")
+                h1 = etree.SubElement(level1, "h1")
+                h1.text = " ".join(item["words"])
+                
+                # 레벨 요소 업데이트
+                level_elements[1] = level1
                 current_level = 1
-                heading = etree.SubElement(current_level1, "h1")
-                heading.text = " ".join(item["words"])
+                
+                # 더 낮은 레벨 요소들 제거 (새로운 level1이 시작되므로)
+                for l in range(2, 7):
+                    if l in level_elements:
+                        del level_elements[l]
+                        
             else:
-                # level2~6은 이전 level 내에 위치
-                if current_level1 is None:
+                # level2~6 처리
+                if 1 not in level_elements:
                     # level1이 없는 경우 생성
-                    current_level1 = etree.SubElement(dtbook_bodymatter, "level1",
-                                                    id=item["id"],
-                                                    smilref=f"dtbook.smil#smil_par_{item['id']}")
+                    level1 = etree.SubElement(dtbook_bodymatter, "level1",
+                                            id=item["id"],
+                                            smilref=f"dtbook.smil#smil_par_{item['id']}")
+                    h1 = etree.SubElement(level1, "h1")
+                    h1.text = "제목 없음"
+                    level_elements[1] = level1
                     current_level = 1
-                    heading = etree.SubElement(current_level1, "h1")
-                    heading.text = "제목 없음"
 
-                # 현재 레벨에 맞는 부모 요소 찾기
-                parent = current_level1
-                current_level_elem = None
-                for l in range(2, level):
-                    level_elem = parent.find(f"level{l}")
-                    if level_elem is None:
-                        # 중간 레벨이 없으면 생성
-                        level_elem = etree.SubElement(parent, f"level{l}",
-                                                    id=item["id"],
-                                                    smilref=f"dtbook.smil#smil_par_{item['id']}")
-                        heading = etree.SubElement(level_elem, f"h{l}")
-                        heading.text = f"제목 {l}"
-                    parent = level_elem
-                    current_level_elem = level_elem
-
+                # 부모 레벨 찾기 (현재 레벨보다 1 작은 레벨)
+                parent_level = level - 1
+                parent_elem = level_elements.get(parent_level)
+                
+                if parent_elem is None:
+                    # 부모 레벨이 없으면 level1을 부모로 사용
+                    parent_elem = level_elements[1]
+                
                 # 새로운 level 요소 생성
-                new_level = etree.SubElement(parent, f"level{level}",
+                new_level = etree.SubElement(parent_elem, f"level{level}",
                                            id=item["id"],
                                            smilref=f"dtbook.smil#smil_par_{item['id']}")
+                
+                # 제목 요소 생성
                 heading = etree.SubElement(new_level, f"h{level}")
                 heading.text = " ".join(item["words"])
-
-                # 현재 레벨 요소 업데이트
-                if level > current_level:
-                    current_level_elem = new_level
+                
+                # 레벨 요소 업데이트
+                level_elements[level] = new_level
                 current_level = level
+                
+                # 더 높은 레벨 요소들 제거 (새로운 레벨이 시작되므로)
+                for l in range(level + 1, 7):
+                    if l in level_elements:
+                        del level_elements[l]
 
             # 기타 마커 처리
             for marker in item.get("markers", []):
                 if marker.type != "page":  # 페이지 마커는 이미 처리됨
                     elem_info = MarkerProcessor.create_dtbook_element(marker)
                     if elem_info:
-                        marker_elem = etree.SubElement(current_level_elem or current_level1,
+                        # 현재 레벨 요소에 마커 추가
+                        current_elem = level_elements.get(current_level, level_elements.get(1))
+                        marker_elem = etree.SubElement(current_elem,
                                                      elem_info["tag"],
                                                      attrib=elem_info["attrs"])
                         marker_elem.text = elem_info["text"]
-
-            # 일반 텍스트 내용 추가
-            if not item["type"].startswith("h"):
-                parent_elem = current_level_elem or current_level1
-                p = etree.SubElement(parent_elem, "p",
-                                   id=item["id"],
-                                   smilref=f"dtbook.smil#smil_par_{item['id']}")
-                
-                # <br/> 태그가 포함된 경우 실제 br 요소로 생성
-                if item.get("text", "") == "<br/>":
-                    br_elem = etree.SubElement(p, "br")
-                else:
-                    p.text = " ".join(item["words"])
         else:
-            # 일반 단락은 현재 level 요소 내에 추가
-            if current_level1 is None:
+            # 일반 단락은 현재 활성 레벨 요소에 추가
+            parent_elem = level_elements.get(current_level, dtbook_bodymatter)
+            if parent_elem is dtbook_bodymatter:
                 # level1이 없는 경우 생성
-                current_level1 = etree.SubElement(dtbook_bodymatter, "level1",
-                                                id=item["id"],
-                                                smilref=f"dtbook.smil#smil_par_{item['id']}")
-                # 임시 제목 추가
-                temp_h1 = etree.SubElement(current_level1, "h1")
-                temp_h1.text = "제목 없음"
+                level1 = etree.SubElement(dtbook_bodymatter, "level1",
+                                        id=item["id"],
+                                        smilref=f"dtbook.smil#smil_par_{item['id']}")
+                h1 = etree.SubElement(level1, "h1")
+                h1.text = "제목 없음"
+                level_elements[1] = level1
+                current_level = 1
+                parent_elem = level1
 
-            p = etree.SubElement(current_level1, "p",
-                                 id=item["id"],
-                                 smilref=f"dtbook.smil#smil_par_{item['id']}")
+            p = etree.SubElement(parent_elem, "p",
+                               id=item["id"],
+                               smilref=f"dtbook.smil#smil_par_{item['id']}")
             
             # <br/> 태그가 포함된 경우 실제 br 요소로 생성
             if item.get("text", "") == "<br/>":
@@ -868,9 +1015,9 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                 if marker.type != "page":  # 페이지 마커는 이미 처리됨
                     elem_info = MarkerProcessor.create_dtbook_element(marker)
                     if elem_info:
-                        marker_elem = etree.SubElement(current_level1,
-                                                       elem_info["tag"],
-                                                       attrib=elem_info["attrs"])
+                        marker_elem = etree.SubElement(parent_elem,
+                                                     elem_info["tag"],
+                                                     attrib=elem_info["attrs"])
                         marker_elem.text = elem_info["text"]
 
     # XML 파일 저장
@@ -925,9 +1072,9 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
         dc_metadata, "{%s}Date" % dc_ns, nsmap={'dc': dc_ns})
     date_elem.text = datetime.now().strftime("%Y-%m-%d")
 
-    # publisher_elem = etree.SubElement(
-    #     dc_metadata, "{%s}Publisher" % dc_ns, nsmap={'dc': dc_ns})
-    # publisher_elem.text = book_publisher
+    publisher_elem = etree.SubElement(
+        dc_metadata, "{%s}Publisher" % dc_ns, nsmap={'dc': dc_ns})
+    publisher_elem.text = book_publisher
 
     title_elem = etree.SubElement(
         dc_metadata, "{%s}Title" % dc_ns, nsmap={'dc': dc_ns})
@@ -1022,12 +1169,12 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             for cell in table_data["cells"]:
                 if cell.get("images"):
                     for img_idx, img in enumerate(cell["images"]):
-                        # 이미지 파일명 생성 (표 처리 시와 동일한 방식)
+                        # 이미지 파일명 생성 (미리 수집한 이미지 관계 정보 활용)
                         image_ext = ".jpeg"
                         try:
                             if 'image_rid' in img:
-                                rel = document.part.rels[img['image_rid']]
-                                if hasattr(rel, 'target_ref'):
+                                rel = image_relations.get(img['image_rid'])  # 미리 수집한 관계 사용
+                                if rel and hasattr(rel, 'target_ref'):
                                     ext = os.path.splitext(rel.target_ref)[1]
                                     if ext:
                                         image_ext = ext
@@ -1265,7 +1412,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     # navMap
     nav_map = etree.SubElement(ncx_root, "navMap")
 
-    # 목차 항목 생성
+    # 목차 항목 생성 (제목만 포함, 표 제외)
     play_order = 1
     current_level1_point = None
     current_level2_point = None
@@ -1315,25 +1462,6 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             elif level == 6 and current_level5_point is not None:
                 current_level5_point.append(nav_point)
 
-            play_order += 1
-        elif item["type"] == "table":
-            # 표 네비게이션 포인트 추가
-            nav_point = etree.Element("navPoint",
-                                     id=f"ncx_{item['id']}",
-                                     **{"class": "level1"},
-                                     playOrder=str(play_order))
-            nav_label = etree.SubElement(nav_point, "navLabel")
-            text = etree.SubElement(nav_label, "text")
-            text.text = f"표 {play_order}"  # 표 제목 또는 번호
-            content = etree.SubElement(nav_point, "content",
-                                       src=f"dtbook.smil#smil_par_{item['id']}")
-            
-            # 현재 레벨에 추가
-            if current_level1_point is not None:
-                current_level1_point.append(nav_point)
-            else:
-                nav_map.append(nav_point)
-            
             play_order += 1
 
     # pageList (페이지 마커가 있는 경우 추가)
@@ -1501,6 +1629,11 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     print(f"생성된 파일은 '{output_dir}' 폴더에 있습니다.")
     print("주의: 이 코드는 DOCX의 기본적인 제목/문단 구조만 변환하며,")
     print("      오디오, SMIL 동기화, 목록, 표, 이미지, 페이지 번호 등은 포함하지 않습니다.")
+
+    # 최종 메모리 정리 (모든 DAISY 파일 생성 완료 후)
+    if 'image_relations' in locals():
+        del image_relations
+    gc.collect()
 
 
 def zip_daisy_output(source_dir, output_zip_filename):
