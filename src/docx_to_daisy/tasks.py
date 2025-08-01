@@ -10,9 +10,12 @@ import shutil
 import uuid
 import time
 import json
+import zipfile
 from typing import Dict, Any, Optional
 
-from .cli import create_daisy_book, zip_daisy_output, create_epub3_book
+from .converter.docxTodaisy import create_daisy_book, zip_daisy_output
+from .converter.docxToepub import create_epub3_book
+from .converter.daisyToepub import create_epub3_from_daisy, zip_epub_output
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
@@ -118,6 +121,9 @@ def process_conversion_task(file_path, output_path, title=None, author=None, pub
     job = get_current_job()
     job_id = job.id if job else None
     
+    # 작업 시작 시간 기록
+    start_time = time.time()
+    
     logger.info(f"변환 작업 시작: {file_path}, 제목={title}, 저자={author}, 출판사={publisher}, 언어={language}")
     
     # 임시 출력 디렉토리 초기화
@@ -125,7 +131,7 @@ def process_conversion_task(file_path, output_path, title=None, author=None, pub
     
     try:
         if job_id:
-            update_job_progress(job_id, 0, "변환 작업이 시작되었습니다.")
+            update_job_progress(job_id, 0, "변환 작업이 시작되었습니다.", {"start_time": start_time})
         
         # 고유 ID 생성
         unique_id = str(uuid.uuid4())
@@ -136,19 +142,22 @@ def process_conversion_task(file_path, output_path, title=None, author=None, pub
         
         # DOCX 파일 검증
         if job_id:
-            update_job_progress(job_id, 10, "DOCX 파일 검증 중...")
+            elapsed_time = time.time() - start_time
+            update_job_progress(job_id, 10, f"DOCX 파일 검증 중... (경과: {elapsed_time:.1f}초)")
         
         # 파일 존재 확인
         if not os.path.exists(file_path):
             error_msg = f"DOCX 파일을 찾을 수 없습니다: {file_path}"
             logger.error(error_msg)
             if job_id:
-                update_job_progress(job_id, -1, error_msg)
+                elapsed_time = time.time() - start_time
+                update_job_progress(job_id, -1, error_msg, {"elapsed_time": elapsed_time})
             raise FileNotFoundError(error_msg)
         
         # DAISY 파일 생성
         if job_id:
-            update_job_progress(job_id, 20, "DAISY 파일 생성 중...")
+            elapsed_time = time.time() - start_time
+            update_job_progress(job_id, 20, f"DAISY 파일 생성 중... (경과: {elapsed_time:.1f}초)")
         
         logger.info("DAISY 파일 생성 시작")
         create_daisy_book(
@@ -162,7 +171,8 @@ def process_conversion_task(file_path, output_path, title=None, author=None, pub
         logger.info("DAISY 파일 생성 완료")
         
         if job_id:
-            update_job_progress(job_id, 80, "DAISY 파일 생성 완료, ZIP 파일 생성 중...")
+            elapsed_time = time.time() - start_time
+            update_job_progress(job_id, 80, f"DAISY 파일 생성 완료, ZIP 파일 생성 중... (경과: {elapsed_time:.1f}초)")
         
         # ZIP 파일 생성
         logger.info("ZIP 파일 생성 시작")
@@ -170,13 +180,21 @@ def process_conversion_task(file_path, output_path, title=None, author=None, pub
         logger.info(f"ZIP 파일 생성 완료: {output_path}")
         
         if job_id:
-            update_job_progress(job_id, 95, "ZIP 파일 생성 완료, 임시 파일 정리 중...")
+            elapsed_time = time.time() - start_time
+            update_job_progress(job_id, 95, f"ZIP 파일 생성 완료, 임시 파일 정리 중... (경과: {elapsed_time:.1f}초)")
         
         # 임시 파일 정리
         cleanup_temp_files(output_dir)
         
+        # 총 소요 시간 계산
+        total_time = time.time() - start_time
+        
         if job_id:
-            update_job_progress(job_id, 100, "변환 작업이 완료되었습니다.", {"output_path": output_path})
+            update_job_progress(job_id, 100, f"변환 작업이 완료되었습니다. (총 소요시간: {total_time:.1f}초)", {
+                "output_path": output_path,
+                "total_time": total_time,
+                "elapsed_time": total_time
+            })
         
         return output_path
     
@@ -184,13 +202,15 @@ def process_conversion_task(file_path, output_path, title=None, author=None, pub
         error_msg = f"파일을 찾을 수 없습니다: {str(e)}"
         logger.error(error_msg)
         if job_id:
-            update_job_progress(job_id, -1, error_msg)
+            elapsed_time = time.time() - start_time
+            update_job_progress(job_id, -1, error_msg, {"elapsed_time": elapsed_time})
         raise
     except ValueError as e:
         error_msg = f"입력 데이터 오류: {str(e)}"
         logger.error(error_msg)
         if job_id:
-            update_job_progress(job_id, -1, error_msg)
+            elapsed_time = time.time() - start_time
+            update_job_progress(job_id, -1, error_msg, {"elapsed_time": elapsed_time})
         raise
     except Exception as e:
         error_msg = f"변환 작업 중 예상치 못한 오류 발생: {str(e)}"
@@ -198,11 +218,13 @@ def process_conversion_task(file_path, output_path, title=None, author=None, pub
         
         # 오류 상태 업데이트
         if job_id:
-            update_job_progress(job_id, -1, error_msg)
+            elapsed_time = time.time() - start_time
+            update_job_progress(job_id, -1, error_msg, {"elapsed_time": elapsed_time})
         
         # 임시 파일 정리
-        if output_dir:
+        if output_dir and output_dir.exists():
             cleanup_temp_files(output_dir)
+        
         raise
 
 def cleanup_temp_files(output_dir):
@@ -230,10 +252,13 @@ def process_epub3_conversion_task(file_path, output_path, title=None, author=Non
     Returns:
         str: 생성된 EPUB 파일 경로
     """
-    # 현재 작업 ID 가져오기 (RQ는 현재 작업 컨텍스트 제공)
+    # 현재 작업 ID 가져오기
     from rq import get_current_job
     job = get_current_job()
     job_id = job.id if job else None
+    
+    # 작업 시작 시간 기록
+    start_time = time.time()
     
     logger.info(f"EPUB3 변환 작업 시작: {file_path}, 제목={title}, 저자={author}, 출판사={publisher}, 언어={language}")
     
@@ -242,35 +267,38 @@ def process_epub3_conversion_task(file_path, output_path, title=None, author=Non
     
     try:
         if job_id:
-            update_job_progress(job_id, 0, "EPUB3 변환 작업이 시작되었습니다.")
+            update_job_progress(job_id, 0, "EPUB3 변환 작업이 시작되었습니다.", {"start_time": start_time})
         
         # 고유 ID 생성
         unique_id = str(uuid.uuid4())
-        logger.info(f"EPUB3 작업 ID: {unique_id}")
+        logger.info(f"작업 ID: {unique_id}")
         
         # 임시 출력 디렉토리
-        output_dir = TEMP_DIR / f"epub3_output_{unique_id}"
+        output_dir = TEMP_DIR / f"epub_output_{unique_id}"
         
         # DOCX 파일 검증
         if job_id:
-            update_job_progress(job_id, 10, "DOCX 파일 검증 중...")
+            elapsed_time = time.time() - start_time
+            update_job_progress(job_id, 10, f"DOCX 파일 검증 중... (경과: {elapsed_time:.1f}초)")
         
         # 파일 존재 확인
         if not os.path.exists(file_path):
             error_msg = f"DOCX 파일을 찾을 수 없습니다: {file_path}"
             logger.error(error_msg)
             if job_id:
-                update_job_progress(job_id, -1, error_msg)
+                elapsed_time = time.time() - start_time
+                update_job_progress(job_id, -1, error_msg, {"elapsed_time": elapsed_time})
             raise FileNotFoundError(error_msg)
         
         # EPUB3 파일 생성
         if job_id:
-            update_job_progress(job_id, 20, "EPUB3 파일 생성 중...")
+            elapsed_time = time.time() - start_time
+            update_job_progress(job_id, 20, f"EPUB3 파일 생성 중... (경과: {elapsed_time:.1f}초)")
         
         logger.info("EPUB3 파일 생성 시작")
-        epub_file_path = create_epub3_book(
+        create_epub3_book(
             docx_file_path=file_path,
-            output_dir=str(output_dir),
+            output_path=output_path,
             book_title=title,
             book_author=author,
             book_publisher=publisher,
@@ -279,21 +307,22 @@ def process_epub3_conversion_task(file_path, output_path, title=None, author=Non
         logger.info("EPUB3 파일 생성 완료")
         
         if job_id:
-            update_job_progress(job_id, 80, "EPUB3 파일 생성 완료, 파일 복사 중...")
-        
-        # 결과 파일을 지정된 위치로 복사
-        logger.info("EPUB3 파일 복사 시작")
-        shutil.copy2(epub_file_path, output_path)
-        logger.info(f"EPUB3 파일 복사 완료: {output_path}")
-        
-        if job_id:
-            update_job_progress(job_id, 95, "EPUB3 파일 복사 완료, 임시 파일 정리 중...")
+            elapsed_time = time.time() - start_time
+            update_job_progress(job_id, 95, f"EPUB3 파일 생성 완료, 임시 파일 정리 중... (경과: {elapsed_time:.1f}초)")
         
         # 임시 파일 정리
-        cleanup_temp_files(output_dir)
+        if output_dir and output_dir.exists():
+            cleanup_temp_files(output_dir)
+        
+        # 총 소요 시간 계산
+        total_time = time.time() - start_time
         
         if job_id:
-            update_job_progress(job_id, 100, "EPUB3 변환 작업이 완료되었습니다.", {"output_path": output_path})
+            update_job_progress(job_id, 100, f"EPUB3 변환 작업이 완료되었습니다. (총 소요시간: {total_time:.1f}초)", {
+                "output_path": output_path,
+                "total_time": total_time,
+                "elapsed_time": total_time
+            })
         
         return output_path
     
@@ -301,13 +330,15 @@ def process_epub3_conversion_task(file_path, output_path, title=None, author=Non
         error_msg = f"파일을 찾을 수 없습니다: {str(e)}"
         logger.error(error_msg)
         if job_id:
-            update_job_progress(job_id, -1, error_msg)
+            elapsed_time = time.time() - start_time
+            update_job_progress(job_id, -1, error_msg, {"elapsed_time": elapsed_time})
         raise
     except ValueError as e:
         error_msg = f"입력 데이터 오류: {str(e)}"
         logger.error(error_msg)
         if job_id:
-            update_job_progress(job_id, -1, error_msg)
+            elapsed_time = time.time() - start_time
+            update_job_progress(job_id, -1, error_msg, {"elapsed_time": elapsed_time})
         raise
     except Exception as e:
         error_msg = f"EPUB3 변환 작업 중 예상치 못한 오류 발생: {str(e)}"
@@ -315,9 +346,130 @@ def process_epub3_conversion_task(file_path, output_path, title=None, author=Non
         
         # 오류 상태 업데이트
         if job_id:
-            update_job_progress(job_id, -1, error_msg)
+            elapsed_time = time.time() - start_time
+            update_job_progress(job_id, -1, error_msg, {"elapsed_time": elapsed_time})
         
         # 임시 파일 정리
-        if output_dir:
+        if output_dir and output_dir.exists():
             cleanup_temp_files(output_dir)
+        
+        raise
+
+
+def process_daisy_to_epub_task(zip_file_path, output_path, title=None, author=None, publisher=None, language="ko"):
+    """
+    DAISY ZIP 파일을 EPUB3 형식으로 변환하는 작업을 처리합니다.
+    
+    Args:
+        zip_file_path (str): 변환할 DAISY ZIP 파일 경로
+        output_path (str): 결과 EPUB 파일 경로
+        title (str, optional): 책 제목
+        author (str, optional): 저자
+        publisher (str, optional): 출판사
+        language (str, optional): 언어 코드 (기본값: ko)
+        
+    Returns:
+        str: 생성된 EPUB 파일 경로
+    """
+    # 현재 작업 ID 가져오기
+    from rq import get_current_job
+    job = get_current_job()
+    job_id = job.id if job else None
+    
+    # 작업 시작 시간 기록
+    start_time = time.time()
+    
+    logger.info(f"DAISY to EPUB3 변환 작업 시작: {zip_file_path}, 제목={title}, 저자={author}, 출판사={publisher}, 언어={language}")
+    
+    # 임시 출력 디렉토리 초기화
+    output_dir = None
+    
+    try:
+        if job_id:
+            update_job_progress(job_id, 0, "DAISY to EPUB3 변환 작업이 시작되었습니다.", {"start_time": start_time})
+        
+        # 고유 ID 생성
+        unique_id = str(uuid.uuid4())
+        logger.info(f"작업 ID: {unique_id}")
+        
+        # 임시 출력 디렉토리
+        output_dir = TEMP_DIR / f"daisy_to_epub_output_{unique_id}"
+        
+        # DAISY ZIP 파일 검증
+        if job_id:
+            elapsed_time = time.time() - start_time
+            update_job_progress(job_id, 10, f"DAISY ZIP 파일 검증 중... (경과: {elapsed_time:.1f}초)")
+        
+        # 파일 존재 확인
+        if not os.path.exists(zip_file_path):
+            error_msg = f"DAISY ZIP 파일을 찾을 수 없습니다: {zip_file_path}"
+            logger.error(error_msg)
+            if job_id:
+                elapsed_time = time.time() - start_time
+                update_job_progress(job_id, -1, error_msg, {"elapsed_time": elapsed_time})
+            raise FileNotFoundError(error_msg)
+        
+        # EPUB3 파일 생성
+        if job_id:
+            elapsed_time = time.time() - start_time
+            update_job_progress(job_id, 20, f"DAISY to EPUB3 변환 중... (경과: {elapsed_time:.1f}초)")
+        
+        logger.info("DAISY to EPUB3 변환 시작")
+        convert_daisy_to_epub3(
+            zip_file_path=zip_file_path,
+            output_path=output_path,
+            book_title=title,
+            book_author=author,
+            book_publisher=publisher,
+            book_language=language
+        )
+        logger.info("DAISY to EPUB3 변환 완료")
+        
+        if job_id:
+            elapsed_time = time.time() - start_time
+            update_job_progress(job_id, 95, f"DAISY to EPUB3 변환 완료, 임시 파일 정리 중... (경과: {elapsed_time:.1f}초)")
+        
+        # 임시 파일 정리
+        if output_dir and output_dir.exists():
+            cleanup_temp_files(output_dir)
+        
+        # 총 소요 시간 계산
+        total_time = time.time() - start_time
+        
+        if job_id:
+            update_job_progress(job_id, 100, f"DAISY to EPUB3 변환 작업이 완료되었습니다. (총 소요시간: {total_time:.1f}초)", {
+                "output_path": output_path,
+                "total_time": total_time,
+                "elapsed_time": total_time
+            })
+        
+        return output_path
+    
+    except FileNotFoundError as e:
+        error_msg = f"파일을 찾을 수 없습니다: {str(e)}"
+        logger.error(error_msg)
+        if job_id:
+            elapsed_time = time.time() - start_time
+            update_job_progress(job_id, -1, error_msg, {"elapsed_time": elapsed_time})
+        raise
+    except ValueError as e:
+        error_msg = f"입력 데이터 오류: {str(e)}"
+        logger.error(error_msg)
+        if job_id:
+            elapsed_time = time.time() - start_time
+            update_job_progress(job_id, -1, error_msg, {"elapsed_time": elapsed_time})
+        raise
+    except Exception as e:
+        error_msg = f"DAISY to EPUB3 변환 작업 중 예상치 못한 오류 발생: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        
+        # 오류 상태 업데이트
+        if job_id:
+            elapsed_time = time.time() - start_time
+            update_job_progress(job_id, -1, error_msg, {"elapsed_time": elapsed_time})
+        
+        # 임시 파일 정리
+        if output_dir and output_dir.exists():
+            cleanup_temp_files(output_dir)
+        
         raise 

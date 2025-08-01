@@ -1,0 +1,2 @@
+include src/docx_to_daisy/converter/*
+recursive-include src/docx_to_daisy/converter * 

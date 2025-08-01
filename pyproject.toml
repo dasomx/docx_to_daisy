@@ -31,5 +31,6 @@ docx-to-daisy-worker = "docx_to_daisy.worker:main"
 [tool.setuptools]
 package-dir = {"" = "src"}
 packages = ["docx_to_daisy"]
+include-package-data = true
 
 [tool.uv]
