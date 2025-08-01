@@ -1,4 +1,5 @@
 import os
+import time
 import tempfile
 import uuid
 import logging
@@ -278,12 +279,37 @@ async def get_task_status(task_id: str = FastAPIPath(..., description="변환 �
                 progress = job_meta.get('progress', 0)
                 message = job_meta.get('message', '')
                 updated_at = job_meta.get('updated_at')
+                start_time = job_meta.get('start_time')
+                total_time = job_meta.get('total_time')
+                elapsed_time = job_meta.get('elapsed_time')
                 
                 response.update({
                     "progress": progress,
                     "message": message,
                     "updated_at": updated_at
                 })
+                
+                # 시간 정보 추가
+                if start_time:
+                    response["start_time"] = start_time
+                    
+                    # 매 호출마다 현재 경과 시간 계산
+                    current_elapsed = time.time() - start_time
+                    response["current_elapsed_time"] = current_elapsed
+                    
+                    # 진행 중인 작업의 경우 실시간 경과 시간을 메시지에 포함
+                    if status in ["started", "deferred", "queued"]:
+                        if "message" in response and response["message"]:
+                            # 기존 메시지에서 시간 정보 제거 (있다면)
+                            base_message = response["message"]
+                            if " (경과:" in base_message:
+                                base_message = base_message.split(" (경과:")[0]
+                            response["message"] = f"{base_message} (경과: {current_elapsed:.1f}초)"
+                
+                if total_time:
+                    response["total_time"] = total_time
+                if elapsed_time:
+                    response["elapsed_time"] = elapsed_time
             
             # 로컬 상태 정보 추가
             if task_id in job_statuses:
@@ -308,27 +334,44 @@ async def get_task_status(task_id: str = FastAPIPath(..., description="변환 �
                 zip_file_path = RESULTS_DIR / f"{task_id}.zip"
                 epub_file_path = RESULTS_DIR / f"{task_id}.epub"
                 
+                # 완료된 작업의 경우 총 소요 시간을 메시지에 포함
+                if "current_elapsed_time" in response:
+                    total_time = response["current_elapsed_time"]
+                    response["total_time"] = total_time
+                    response["elapsed_time"] = total_time
+                
                 if format_type == "daisy_to_epub3" and epub_file_path.exists():
                     response["download_url"] = f"/download-daisy-to-epub/{task_id}"
                     response["format"] = "daisy_to_epub3"
                     if "message" not in response or not response["message"]:
-                        response["message"] = "DAISY to EPUB3 변환 작업이 완료되었습니다. 다운로드 URL을 사용하여 결과를 받으세요."
+                        response["message"] = f"DAISY to EPUB3 변환 작업이 완료되었습니다. (총 소요시간: {total_time:.1f}초) 다운로드 URL을 사용하여 결과를 받으세요."
                 elif format_type == "epub3" and epub_file_path.exists():
                     response["download_url"] = f"/download-epub/{task_id}"
                     response["format"] = "epub3"
                     if "message" not in response or not response["message"]:
-                        response["message"] = "EPUB3 변환 작업이 완료되었습니다. 다운로드 URL을 사용하여 결과를 받으세요."
+                        response["message"] = f"EPUB3 변환 작업이 완료되었습니다. (총 소요시간: {total_time:.1f}초) 다운로드 URL을 사용하여 결과를 받으세요."
                 elif zip_file_path.exists():
                     response["download_url"] = f"/download/{task_id}"
                     response["format"] = "daisy"
                     if "message" not in response or not response["message"]:
-                        response["message"] = "DAISY 변환 작업이 완료되었습니다. 다운로드 URL을 사용하여 결과를 받으세요."
+                        response["message"] = f"DAISY 변환 작업이 완료되었습니다. (총 소요시간: {total_time:.1f}초) 다운로드 URL을 사용하여 결과를 받으세요."
                 else:
                     if "message" not in response or not response["message"]:
                         response["message"] = "변환 작업이 완료되었지만 결과 파일을 찾을 수 없습니다."
             elif status == "failed":
-                if "message" not in response or not response["message"]:
-                    response["message"] = "변환 작업이 실패했습니다."
+                # 실패한 작업의 경우 경과 시간을 메시지에 포함
+                if "current_elapsed_time" in response:
+                    elapsed_time = response["current_elapsed_time"]
+                    if "message" not in response or not response["message"]:
+                        response["message"] = f"변환 작업이 실패했습니다. (경과: {elapsed_time:.1f}초)"
+                    else:
+                        # 기존 메시지에 시간 정보 추가
+                        base_message = response["message"]
+                        if " (경과:" not in base_message:
+                            response["message"] = f"{base_message} (경과: {elapsed_time:.1f}초)"
+                else:
+                    if "message" not in response or not response["message"]:
+                        response["message"] = "변환 작업이 실패했습니다."
                 response["error_type"] = "job_failed"
             elif status == "started":
                 if "message" not in response or not response["message"]:
@@ -351,7 +394,9 @@ async def get_task_status(task_id: str = FastAPIPath(..., description="변환 �
                     "progress": 100,
                     "download_url": f"/download/{task_id}",
                     "format": "daisy",
-                    "message": "DAISY 변환 작업이 완료되었습니다. 다운로드 URL을 사용하여 결과를 받으세요."
+                    "message": "DAISY 변환 작업이 완료되었습니다. 다운로드 URL을 사용하여 결과를 받으세요.",
+                    "total_time": None,  # 완료된 작업은 시간 정보가 없을 수 있음
+                    "elapsed_time": None
                 }
             elif epub_file_path.exists():
                 return {
@@ -360,7 +405,9 @@ async def get_task_status(task_id: str = FastAPIPath(..., description="변환 �
                     "progress": 100,
                     "download_url": f"/download-epub/{task_id}",
                     "format": "epub3",
-                    "message": "EPUB3 변환 작업이 완료되었습니다. 다운로드 URL을 사용하여 결과를 받으세요."
+                    "message": "EPUB3 변환 작업이 완료되었습니다. 다운로드 URL을 사용하여 결과를 받으세요.",
+                    "total_time": None,  # 완료된 작업은 시간 정보가 없을 수 있음
+                    "elapsed_time": None
                 }
             else:
                 raise HTTPException(status_code=404, detail=f"작업 ID {task_id}를 찾을 수 없습니다.")
