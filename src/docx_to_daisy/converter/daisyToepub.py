@@ -1143,13 +1143,14 @@ def create_nav_xhtml_from_ncx(book_title, nav_points, xhtml_files, ncx_ns, book_
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="{book_language}" lang="{book_language}">
 <head>
     <meta charset="UTF-8" />
-    <title>{html.escape(book_title)}</title>
+    <title>{html.escape(book_title)} - Table of Contents</title>
     <link rel="stylesheet" type="text/css" href="zedai-css.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 </head>
 <body xmlns:epub="http://www.idpf.org/2007/ops">
-    <nav epub:type="toc">
-        <h1>Table of Contents</h1>
-        <ol>'''
+    <nav epub:type="toc" id="toc" role="doc-toc">
+        <h1>목차</h1>
+        <ol role="list">'''
     
     # xhtml_files와 nav_points를 매칭
     xhtml_file_map = {i+1: xhtml_file for i, xhtml_file in enumerate(xhtml_files)}
@@ -1172,19 +1173,16 @@ def create_nav_xhtml_from_ncx(book_title, nav_points, xhtml_files, ncx_ns, book_
             nav += f'''
                         <li id="{nav_point.get('id', '')}" class="level1"><a href="{xhtml_file['filename']}#{nav_point.get('id', '').replace('ncx_', '')}">{html.escape(title)}</a>'''
             
-            # level2 navPoint들 찾기
-            level2_nav_points = nav_point.findall(f"{{{ncx_ns}}}navPoint")
-            if level2_nav_points:
-                nav += '''
+            # 하위 레벨 navPoint들을 재귀적으로 처리
+            sub_nav_points = nav_point.findall(f"{{{ncx_ns}}}navPoint")
+            if sub_nav_points:
+                # level2가 있는지 확인
+                level2_points = [sub_nav for sub_nav in sub_nav_points if sub_nav.get('class', '') == 'level2']
+                if level2_points:
+                    nav += '''
                                 <ol>'''
-                for level2_nav in level2_nav_points:
-                    if level2_nav.get('class') == 'level2':
-                        level2_label = level2_nav.find(f"{{{ncx_ns}}}navLabel")
-                        if level2_label is not None:
-                            level2_title = level2_label.find(f"{{{ncx_ns}}}text").text if level2_label.find(f"{{{ncx_ns}}}text") is not None else ""
-                            nav += f'''
-                                        <li id="{level2_nav.get('id', '')}" class="level2"><a href="{xhtml_file['filename']}#{level2_nav.get('id', '').replace('ncx_', '')}">{html.escape(level2_title)}</a></li>'''
-                nav += '''
+                    nav += process_nav_points_recursive(sub_nav_points, xhtml_file, ncx_ns, 2, "                                        ")
+                    nav += '''
                                 </ol>'''
             
             nav += '''
@@ -1198,6 +1196,37 @@ def create_nav_xhtml_from_ncx(book_title, nav_points, xhtml_files, ncx_ns, book_
     
     return nav
 
+def process_nav_points_recursive(nav_points, xhtml_file, ncx_ns, current_level, indent="                                        "):
+    """재귀적으로 모든 레벨의 navPoint를 처리합니다."""
+    nav_content = ""
+    
+    for nav_point in nav_points:
+        level_class = nav_point.get('class', '')
+        if level_class == f'level{current_level}':
+            # 현재 레벨의 navPoint 처리
+            nav_label = nav_point.find(f"{{{ncx_ns}}}navLabel")
+            if nav_label is not None:
+                title = nav_label.find(f"{{{ncx_ns}}}text").text if nav_label.find(f"{{{ncx_ns}}}text") is not None else ""
+                nav_content += f'''
+{indent}<li id="{nav_point.get('id', '')}" class="{level_class}"><a href="{xhtml_file['filename']}#{nav_point.get('id', '').replace('ncx_', '')}">{html.escape(title)}</a>'''
+                
+                # 하위 레벨 navPoint들 찾기
+                sub_nav_points = nav_point.findall(f"{{{ncx_ns}}}navPoint")
+                if sub_nav_points:
+                    # 다음 레벨의 navPoint가 있는지 확인
+                    next_level_points = [sub_nav for sub_nav in sub_nav_points if sub_nav.get('class', '') == f'level{current_level + 1}']
+                    if next_level_points:
+                        nav_content += f'''
+{indent}        <ol>'''
+                        nav_content += process_nav_points_recursive(sub_nav_points, xhtml_file, ncx_ns, current_level + 1, indent + "        ")
+                        nav_content += f'''
+{indent}        </ol>'''
+                
+                nav_content += f'''
+{indent}</li>'''
+    
+    return nav_content
+
 def create_css_content():
     """CSS 파일 내용을 생성합니다."""
     return '''/* EPUB3 CSS for DAISY conversion */
@@ -1209,6 +1238,126 @@ body {
     padding: 20px;
     background-color: #ffffff;
     color: #000000;
+}
+
+/* Navigation styles for proper hierarchical display */
+nav[epub|type="toc"] {
+    font-family: "Malgun Gothic", "맑은 고딕", sans-serif;
+}
+
+nav[epub|type="toc"] h1 {
+    font-size: 1.5em;
+    font-weight: bold;
+    margin-bottom: 1em;
+    color: #2c3e50;
+    border-bottom: 2px solid #3498db;
+    padding-bottom: 0.5em;
+}
+
+nav[epub|type="toc"] ol {
+    list-style-type: none;
+    margin: 0;
+    padding: 0;
+}
+
+nav[epub|type="toc"] li {
+    margin: 0.3em 0;
+}
+
+nav[epub|type="toc"] a {
+    text-decoration: none;
+    color: #2c3e50;
+    display: block;
+    padding: 0.2em 0;
+    line-height: 1.4;
+}
+
+nav[epub|type="toc"] a:hover {
+    color: #3498db;
+    text-decoration: underline;
+}
+
+/* Level-specific styles for hierarchical indentation */
+nav[epub|type="toc"] > ol > li {
+    font-weight: bold;
+    font-size: 1.1em;
+    margin: 0.8em 0;
+}
+
+nav[epub|type="toc"] > ol > li > a {
+    color: #2c3e50;
+    font-weight: bold;
+}
+
+nav[epub|type="toc"] > ol > li > ol {
+    margin-top: 0.5em;
+    margin-left: 1.5em;
+}
+
+nav[epub|type="toc"] > ol > li > ol > li {
+    font-weight: normal;
+    font-size: 1em;
+    margin: 0.4em 0;
+}
+
+nav[epub|type="toc"] > ol > li > ol > li > a {
+    color: #34495e;
+    font-weight: normal;
+}
+
+nav[epub|type="toc"] > ol > li > ol > li > ol {
+    margin-left: 1.2em;
+    margin-top: 0.3em;
+}
+
+nav[epub|type="toc"] > ol > li > ol > li > ol > li {
+    font-size: 0.95em;
+    margin: 0.2em 0;
+}
+
+nav[epub|type="toc"] > ol > li > ol > li > ol > li > a {
+    color: #7f8c8d;
+    font-style: italic;
+}
+
+/* Class-based styles for better compatibility */
+nav[epub|type="toc"] .level1 > a {
+    font-weight: bold;
+    font-size: 1.1em;
+    color: #2c3e50;
+}
+
+nav[epub|type="toc"] .level2 > a {
+    font-weight: normal;
+    font-size: 1em;
+    color: #34495e;
+    margin-left: 1em;
+}
+
+nav[epub|type="toc"] .level3 > a {
+    font-weight: normal;
+    font-size: 0.95em;
+    color: #7f8c8d;
+    font-style: italic;
+    margin-left: 2em;
+}
+
+nav[epub|type="toc"] .level4 > a {
+    font-size: 0.9em;
+    color: #95a5a6;
+    margin-left: 3em;
+}
+
+nav[epub|type="toc"] .level5 > a {
+    font-size: 0.85em;
+    color: #bdc3c7;
+    margin-left: 4em;
+}
+
+nav[epub|type="toc"] .level6 > a {
+    font-size: 0.8em;
+    color: #d5dbdb;
+    margin-left: 5em;
 }
 
 /* Title page styles */
