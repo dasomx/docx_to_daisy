@@ -415,14 +415,45 @@ def process_daisy_to_epub_task(zip_file_path, output_path, title=None, author=No
             update_job_progress(job_id, 20, f"DAISY to EPUB3 변환 중... (경과: {elapsed_time:.1f}초)")
         
         logger.info("DAISY to EPUB3 변환 시작")
-        convert_daisy_to_epub3(
-            zip_file_path=zip_file_path,
-            output_path=output_path,
+        
+        # ZIP 파일을 임시 디렉토리에 압축 해제
+        temp_daisy_dir = TEMP_DIR / f"daisy_temp_{unique_id}"
+        temp_daisy_dir.mkdir(exist_ok=True)
+        
+        with zipfile.ZipFile(zip_file_path, 'r') as zip_ref:
+            zip_ref.extractall(temp_daisy_dir)
+        
+        # EPUB 출력 디렉토리 생성
+        temp_epub_dir = TEMP_DIR / f"epub_temp_{unique_id}"
+        temp_epub_dir.mkdir(exist_ok=True)
+        
+        # DAISY를 EPUB3로 변환
+        epub_file_path = create_epub3_from_daisy(
+            daisy_dir=str(temp_daisy_dir),
+            output_dir=str(temp_epub_dir),
             book_title=title,
             book_author=author,
             book_publisher=publisher,
             book_language=language
         )
+        
+        # 생성된 EPUB 파일을 최종 출력 경로로 복사
+        if epub_file_path and os.path.exists(epub_file_path):
+            shutil.copy2(epub_file_path, output_path)
+        else:
+            # 디렉토리에서 EPUB 파일 찾기
+            epub_files = list(temp_epub_dir.glob("*.epub"))
+            if epub_files:
+                shutil.copy2(epub_files[0], output_path)
+            else:
+                raise RuntimeError("EPUB 파일이 생성되지 않았습니다.")
+        
+        # 임시 DAISY 및 EPUB 디렉토리 정리
+        if temp_daisy_dir.exists():
+            shutil.rmtree(temp_daisy_dir)
+        if temp_epub_dir.exists():
+            shutil.rmtree(temp_epub_dir)
+        
         logger.info("DAISY to EPUB3 변환 완료")
         
         if job_id:

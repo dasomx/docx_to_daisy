@@ -409,83 +409,127 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     if len(document.tables) > 0:
         print(f"문서에 {len(document.tables)}개의 표 발견")
         
-        # 셀 병합 정보 미리 계산 (성능 최적화)
+        # 셀 병합 정보 미리 계산 (그리드 기준으로 정확 처리)
         cell_merge_info = {}
         for table_idx, table in enumerate(document.tables):
             tid = id(table._element)
             cell_merge_info[tid] = {}
-            
-            # 병합된 영역을 추적하기 위한 그리드
-            merged_areas = set()
-            
+
+            # 1) 실제 XML tc 기준으로 각 행의 그리드 세그먼트 수집
+            row_segments = []  # [ [ {grid_start, grid_end, colspan, v_state}, ... ], ... ]
             for row_idx, row in enumerate(table.rows):
-                for col_idx, cell in enumerate(row.cells):
-                    cid = id(cell._element)
-                    
-                    # 이미 병합된 영역에 속한 셀인지 확인
-                    if (row_idx, col_idx) in merged_areas:
-                        # 이 셀은 다른 셀의 병합 영역에 속하므로 건너뛰기
-                        cell_merge_info[tid][cid] = {
+                segments = []
+                g = 0
+                try:
+                    tc_list = list(row._tr.tc_lst)
+                except Exception:
+                    # fallback: 고수준 셀에서 tc 추출 (중복 가능)
+                    tc_list = []
+                    seen = set()
+                    for c in row.cells:
+                        if id(c._tc) not in seen:
+                            tc_list.append(c._tc)
+                            seen.add(id(c._tc))
+
+                for tc in tc_list:
+                    try:
+                        tc_pr = tc.get_or_add_tcPr()
+                    except Exception:
+                        # 일부 케이스 방어적 처리
+                        tc_pr = getattr(tc, 'tcPr', None)
+                    # gridSpan
+                    colspan = 1
+                    try:
+                        grid_span = tc_pr.find(qn('w:gridSpan')) if tc_pr is not None else None
+                        if grid_span is not None and grid_span.get(qn('w:val')):
+                            colspan = int(grid_span.get(qn('w:val')))
+                    except Exception:
+                        pass
+                    # vMerge 상태
+                    v_state = None
+                    try:
+                        v_merge = tc_pr.find(qn('w:vMerge')) if tc_pr is not None else None
+                        if v_merge is not None:
+                            v_val = v_merge.get(qn('w:val'))
+                            if v_val == 'restart':
+                                v_state = 'restart'
+                            else:
+                                v_state = 'continue'  # 값 없음 또는 'continue'
+                    except Exception:
+                        pass
+
+                    seg = {
+                        'grid_start': g,
+                        'grid_end': g + colspan - 1,
+                        'colspan': colspan,
+                        'v_state': v_state
+                    }
+                    segments.append(seg)
+                    g += colspan
+
+                row_segments.append(segments)
+
+            # 2) top-left 매핑, rowspan/colspan 계산
+            top_left_of = {}   # (r, g) -> (r0, g0)
+            width_map = {}     # (r0, g0) -> colspan
+            rowspan_map = {}   # (r0, g0) -> rowspan
+
+            # 초기: 같은 행의 가로 병합 반영(top-left는 행의 grid_start)
+            for r, segs in enumerate(row_segments):
+                for seg in segs:
+                    gs, ge = seg['grid_start'], seg['grid_end']
+                    for gg in range(gs, ge + 1):
+                        top_left_of[(r, gg)] = (r, gs)
+                    width_map[(r, gs)] = seg['colspan']
+
+            # 세로 병합 확장(restart 기준으로 아래로 내려가며 continue 병합)
+            for r0, segs in enumerate(row_segments):
+                for seg in segs:
+                    if seg['v_state'] == 'restart':
+                        gs, ge = seg['grid_start'], seg['grid_end']
+                        rs = 1
+                        rr = r0 + 1
+                        while rr < len(row_segments):
+                            # rr 행에서 grid_start를 덮는 세그먼트 찾기
+                            target = None
+                            for s in row_segments[rr]:
+                                if s['grid_start'] <= gs <= s['grid_end']:
+                                    target = s
+                                    break
+                            if target is None:
+                                break
+                            # 계속 병합인지 확인(None 또는 'continue'를 계속으로 간주)
+                            if target['v_state'] in (None, 'continue'):
+                                rs += 1
+                                # 폭(gs..ge)을 rr행에 마킹
+                                for gg in range(gs, ge + 1):
+                                    top_left_of[(rr, gg)] = (r0, gs)
+                                rr += 1
+                            else:
+                                break
+                        rowspan_map[(r0, gs)] = rs
+
+            # 3) (row_idx, col_idx)별 병합 정보 생성 (col_idx를 grid index로 취급)
+            for r, row in enumerate(table.rows):
+                num_cols = len(row.cells)
+                for c in range(num_cols):
+                    tl = top_left_of.get((r, c), (r, c))
+                    if tl == (r, c):
+                        colspan = width_map.get(tl, 1)
+                        rowspan = rowspan_map.get(tl, 1)
+                        cell_merge_info[tid][(r, c)] = {
+                            'rowspan': rowspan,
+                            'colspan': colspan,
+                            'is_merged': (rowspan > 1 or colspan > 1),
+                            'is_merged_area': False
+                        }
+                    else:
+                        cell_merge_info[tid][(r, c)] = {
                             'rowspan': 1,
                             'colspan': 1,
                             'is_merged': False,
-                            'is_merged_area': True  # 병합 영역에 속함을 표시
+                            'is_merged_area': True
                         }
-                        continue
-                    
-                    # 세로 병합 정보 계산
-                    rowspan = 1
-                    colspan = 1
-                    is_merged_cell = False
-                    
-                    # 가로 병합(gridSpan) 확인 - Word XML에서 직접 읽기
-                    try:
-                        tc_pr = cell._tc.get_or_add_tcPr()
-                        grid_span = tc_pr.find(qn('w:gridSpan'))
-                        if grid_span is not None and grid_span.get(qn('w:val')):
-                            colspan = int(grid_span.get(qn('w:val')))
-                            if colspan > 1:
-                                is_merged_cell = True
-                                # 병합된 영역 표시
-                                for c in range(col_idx + 1, col_idx + colspan):
-                                    merged_areas.add((row_idx, c))
-                    except Exception as e:
-                        print(f"gridSpan 읽기 오류: {e}")
-                    
-                    # 세로 병합(vMerge) 확인
-                    if hasattr(cell, '_tc') and hasattr(cell._tc, 'vMerge'):
-                        if cell._tc.vMerge == 'restart':
-                            is_merged_cell = True
-                            # 아래쪽으로 병합된 셀 개수 계산
-                            for next_row_idx in range(row_idx + 1, len(table.rows)):
-                                if col_idx < len(table.rows[next_row_idx].cells):
-                                    next_cell = table.rows[next_row_idx].cells[col_idx]
-                                    if (hasattr(next_cell, '_tc') and hasattr(next_cell._tc, 'vMerge') and 
-                                        next_cell._tc.vMerge == 'continue'):
-                                        rowspan += 1
-                                        # 병합된 영역 표시 (colspan도 고려)
-                                        for c in range(col_idx, col_idx + colspan):
-                                            merged_areas.add((next_row_idx, c))
-                                    else:
-                                        break
-                                else:
-                                    break
-                        elif cell._tc.vMerge == 'continue':
-                            # 이 셀은 위의 셀에 병합됨
-                            cell_merge_info[tid][cid] = {
-                                'rowspan': 1,
-                                'colspan': 1,
-                                'is_merged': False,
-                                'is_merged_area': True  # 병합 영역에 속함을 표시
-                            }
-                            continue
-                    
-                    cell_merge_info[tid][cid] = {
-                        'rowspan': rowspan,
-                        'colspan': colspan,
-                        'is_merged': is_merged_cell,
-                        'is_merged_area': False  # 병합의 시작점
-                    }
         
         for table_idx, table in enumerate(document.tables, 1):
             print(f"표 {table_idx} 처리 중...")
@@ -525,8 +569,8 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                         if img['ancestor_id'] == cid:
                             cell_images_in_cell.append(img)
                     
-                    # 미리 계산된 셀 병합 정보 사용
-                    merge_info = cell_merge_info[tid].get(cid, {
+                    # 미리 계산된 셀 병합 정보 사용 (좌표 기반)
+                    merge_info = cell_merge_info[tid].get((row_idx, col_idx), {
                         'rowspan': 1,
                         'colspan': 1,
                         'is_merged': False,
@@ -663,11 +707,25 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     total_pages = len(page_markers)
     
     for marker in page_markers:
-        try:
-            page_num = int(marker.value)
+        # 페이지 마커 값이 "1", "0-9", "8.1" 등 다양한 포맷일 수 있으므로
+        # 규칙: '-'는 마지막 숫자 세그먼트, '.'는 첫 숫자 세그먼트를 페이지 번호로 본다.
+        value = marker.value
+        page_num = None
+        if '-' in value:
+            nums = re.findall(r'\d+', value)
+            if nums:
+                page_num = int(nums[-1])
+        elif '.' in value:
+            nums = re.findall(r'\d+', value)
+            if nums:
+                page_num = int(nums[0])
+        else:
+            try:
+                page_num = int(value)
+            except ValueError:
+                page_num = None
+        if page_num is not None:
             max_page_number = max(max_page_number, page_num)
-        except ValueError:
-            pass
 
     dtbook_root = etree.Element(
         "{%s}dtbook" % dtbook_ns,
@@ -728,11 +786,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                                  smilref="dtbook.smil#sforsmil-2")
     docauthor.text = book_author
 
-    # 출판사 추가
-    docpublisher = etree.SubElement(dtbook_frontmatter, "docpublisher",
-                                    id="forsmil-3",
-                                    smilref="dtbook.smil#sforsmil-3")
-    docpublisher.text = book_publisher
+    # frontmatter에는 출판사 정보를 포함하지 않음 (요청사항)
 
     # bodymatter 추가
     dtbook_bodymatter = etree.SubElement(dtbook_book, "bodymatter")
@@ -815,7 +869,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                                    class_="data-table",
                                    smilref=f"dtbook.smil#smil_par_{item['id']}",
                                    border="1",
-                                   style="width: 100%; border-collapse: collapse;")
+                                   style="width: 100%; border-collapse: collapse; border: 3px double #000;")
             
             # 표 데이터 가져오기
             table_data = item["table_data"]
@@ -834,7 +888,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                 tr = etree.SubElement(tbody, "tr", 
                                     id=f"forsmil-{element_counter+row_idx}",
                                     smilref=f"dtbook.smil#smil_par_{item['id']}_cell_{row_idx}",
-                                    style="border: 1px solid #000;")
+                                    style="border: 3px double #000;")
                 
                 for col_idx, cell_text in enumerate(row_data):
                     # 셀 정보 찾기
@@ -851,12 +905,12 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                         cell_elem = etree.SubElement(tr, "th", scope="row",
                                                    id=f"forsmil-{element_counter+row_idx*10+col_idx}",
                                                    smilref=f"dtbook.smil#smil_par_{item['id']}_cell_{row_idx}_{col_idx}",
-                                                   style="text-align: left; vertical-align: middle; font-weight: normal;")
+                                                   style="text-align: left; vertical-align: middle; font-weight: normal; border: 3px double #000;")
                     else:
                         cell_elem = etree.SubElement(tr, "td",
                                                    id=f"forsmil-{element_counter+row_idx*10+col_idx}",
                                                    smilref=f"dtbook.smil#smil_par_{item['id']}_cell_{row_idx}_{col_idx}",
-                                                   style="text-align: left; vertical-align: middle; font-weight: normal;")
+                                                   style="text-align: left; vertical-align: middle; font-weight: normal; border: 3px double #000;")
                     
                     # 병합 속성 설정 (병합된 셀인 경우에만)
                     if cell_info and cell_info["is_merged"]:
@@ -1297,8 +1351,15 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
 
         # 표 처리
         if item["type"] == "table":
-            for row_idx, row_data in enumerate(item["table_data"]["rows"]):
+            table_data = item["table_data"]
+            for row_idx, row_data in enumerate(table_data["rows"]):
                 for col_idx, cell_text in enumerate(row_data):
+                    # 병합 영역 셀은 SMIL에서도 생성하지 않음
+                    cell_info = next((cell for cell in table_data["cells"]
+                                      if cell["row"] == row_idx and cell["col"] == col_idx), None)
+                    if cell_info and cell_info.get("is_merged_area", False):
+                        continue
+
                     cell_par = etree.SubElement(root_seq, "par",
                                               id=f"smil_par_{item['id']}_cell_{row_idx}_{col_idx}",
                                               **{"class": "table-cell"})
@@ -1464,39 +1525,28 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
 
             play_order += 1
 
-    # pageList (페이지 마커가 있는 경우 추가)
+    # pageList (문서 내 '$#' 페이지 마커만을 순서대로 추가 - 표지 제외)
     page_targets = []
-    processed_page_markers = set()  # 이미 처리된 페이지 마커 추적
-    
+
     for item in content_structure:
-        # pagenum 타입은 이미 DTBook에서 처리되었으므로 NCX에서 제외
-        if item["type"] == "pagenum":
-            processed_page_markers.add(item["text"])
-            continue
-            
-        for marker in item.get("markers", []):
-            if marker.type == "page":
-                # 이미 처리된 페이지 마커는 건너뛰기
-                if marker.value in processed_page_markers:
-                    continue
-                    
-                page_targets.append({
-                    "id": f"p{marker.value}",
-                    "value": marker.value,
-                    "type": "normal",  # front, normal, special 중 하나
-                    "smil_file": item["smil_file"],
-                    "item_id": item["id"],
-                    "play_order": play_order
-                })
-                processed_page_markers.add(marker.value)
-                play_order += 1
+        if item.get("type") == "pagenum":
+            page_value = str(item.get("text", "")).strip()
+            if not page_value:
+                continue
+            page_targets.append({
+                "id": f"p{page_value}",
+                "value": page_value,
+                "type": "normal",
+                "play_order": play_order
+            })
+            play_order += 1
 
     if page_targets:
         page_list = etree.SubElement(ncx_root, "pageList", id="pages")
         nav_label = etree.SubElement(page_list, "navLabel")
         text = etree.SubElement(nav_label, "text")
         text.text = "Page numbers list"
-        
+
         for page in page_targets:
             nav_point = etree.SubElement(page_list, "pageTarget",
                                         id=page["id"],
@@ -1508,7 +1558,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             text = etree.SubElement(nav_label, "text")
             text.text = page["value"]
             content = etree.SubElement(nav_point, "content",
-                                      src=f"{page['smil_file']}#smil_par_page_{page['value']}_{page['value']}")
+                                      src=f"dtbook.smil#smil_par_page_{page['value']}_{page['value']}")
 
     # navList (각주, 미주 등이 있는 경우 추가)
     note_targets = []
