@@ -955,17 +955,29 @@ async def download_daisy_to_epub_result(task_id: str = FastAPIPath(..., descript
         if not epub_file_path.exists():
             raise HTTPException(status_code=404, detail="EPUB 파일을 찾을 수 없습니다.")
         
-        # 파일명 생성
-        title = "Unknown"
-        # Redis에서 작업 메타데이터 확인
-        try:
-            job = Job.fetch(task_id, connection=redis_conn)
-            if job.meta and 'title' in job.meta:
-                title = job.meta['title']
-        except:
-            pass
-        safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).rstrip()
-        filename = f"{safe_title}.epub"
+        # 파일명 생성: 업로드한 원본 파일명 우선, 없으면 제목 기반, 최후엔 task_id 사용
+        filename = None
+        if task_id in job_statuses and job_statuses[task_id].get("filename"):
+            original_filename = job_statuses[task_id]["filename"]
+            stem = Path(original_filename).stem
+            safe_stem = "".join(c for c in stem if c.isalnum() or c in (' ', '-', '_')).rstrip()
+            filename = f"{safe_stem}.epub"
+
+        if not filename:
+            title = None
+            # Redis에서 작업 메타데이터 확인 (제목이 있으면 사용)
+            try:
+                job = Job.fetch(task_id, connection=redis_conn)
+                if job.meta and 'title' in job.meta and job.meta['title']:
+                    title = job.meta['title']
+            except Exception:
+                pass
+
+            if title:
+                safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).rstrip()
+                filename = f"{safe_title}.epub"
+            else:
+                filename = f"epub3_{task_id}.epub"
         
         logger.info(f"DAISY to EPUB3 파일 다운로드: {epub_file_path}")
         
