@@ -22,7 +22,12 @@ from rq.worker import Worker
 from .converter.docxTodaisy import create_daisy_book, zip_daisy_output
 from .converter.docxToepub import create_epub3_book
 from .converter.daisyToepub import create_epub3_from_daisy, zip_epub_output
-from .tasks import process_conversion_task, process_epub3_conversion_task, process_daisy_to_epub_task
+from .tasks import (
+    process_conversion_task,
+    process_epub3_conversion_task,
+    process_daisy_to_epub_task,
+    process_docx_to_daisy_and_epub_task,
+)
 from .websocket import status_listener, manager
 from .events import start_event_listener, stop_event_listener
 
@@ -135,7 +140,7 @@ def get_queue():
     try:
         return Queue(QUEUE_NAME, connection=get_redis_connection())
     except Exception as e:
-        logger.error(f"큐 생성 실패: {str(e)}")
+        logger.error(f"큐 생성 실패: {str(e)}") 
         raise HTTPException(status_code=503, detail=f"작업 큐를 생성할 수 없습니다: {str(e)}")
 
 @app.post("/convert")
@@ -340,6 +345,17 @@ async def get_task_status(task_id: str = FastAPIPath(..., description="변환 �
                     response["total_time"] = total_time
                     response["elapsed_time"] = total_time
                 
+                # 파이프라인 작업(docx→daisy→epub3) 처리
+                if format_type in ["docx_to_daisy_and_epub3", "pipeline"] and zip_file_path.exists() and epub_file_path.exists():
+                    response["download_urls"] = {
+                        "daisy": f"/download/{task_id}",
+                        "epub3": f"/download-epub/{task_id}",
+                    }
+                    response["download_url"] = f"/download/{task_id}"
+                    response["format"] = "docx_to_daisy_and_epub3"
+                    if "message" not in response or not response["message"]:
+                        response["message"] = f"DOCX→DAISY→EPUB3 파이프라인 작업이 완료되었습니다. (총 소요시간: {total_time:.1f}초) 두 개의 다운로드 URL을 사용하여 결과를 받으세요."
+                
                 if format_type == "daisy_to_epub3" and epub_file_path.exists():
                     response["download_url"] = f"/download-daisy-to-epub/{task_id}"
                     response["format"] = "daisy_to_epub3"
@@ -528,7 +544,15 @@ async def root():
                 "convert": "/convert-daisy-to-epub",
                 "download": "/download-daisy-to-epub/{task_id}",
                 "status": "/task/{task_id}"
-            },
+                },
+                "docx_to_daisy_and_epub3": {
+                    "convert": "/convert-docx-to-daisy-and-epub3",
+                    "downloads": {
+                        "daisy": "/download/{task_id}",
+                        "epub3": "/download-epub/{task_id}"
+                    },
+                    "status": "/task/{task_id}"
+                },
             "websocket": "/ws/task/{task_id}"
         }
     }
@@ -816,6 +840,97 @@ async def convert_docx_to_epub3(
         if temp_docx_path.exists():
             temp_docx_path.unlink()
         raise HTTPException(status_code=500, detail=f"EPUB3 변환 작업 등록 중 오류가 발생했습니다: {str(e)}")
+
+@app.post("/convert-docx-to-daisy-and-epub3")
+async def convert_docx_to_daisy_and_epub3(
+    file: UploadFile = File(...),
+    title: Optional[str] = Form(None),
+    author: Optional[str] = Form(None),
+    publisher: Optional[str] = Form(None),
+    language: str = Form("ko"),
+    priority: Optional[int] = Form(5),
+    background_tasks: BackgroundTasks = None,
+):
+    """
+    DOCX 파일을 업로드하면, 단일 작업으로 DAISY ZIP과 EPUB3 파일을 모두 생성하는 파이프라인을 수행합니다.
+
+    - file: DOCX 파일
+    - title, author, publisher, language: 메타데이터
+    - priority: 작업 우선순위 (1-10)
+    """
+    logger.info(
+        f"파이프라인 변환 요청: 파일명={file.filename}, 제목={title}, 저자={author}, 출판사={publisher}, 언어={language}, 우선순위={priority}"
+    )
+
+    if not file.filename.lower().endswith(".docx"):
+        raise HTTPException(status_code=400, detail="DOCX 파일만 업로드 가능합니다.")
+
+    if priority is not None:
+        try:
+            priority = int(priority)
+            if priority < 1 or priority > 10:
+                raise ValueError()
+        except Exception:
+            raise HTTPException(status_code=400, detail="우선순위는 1-10 사이의 정수여야 합니다.")
+    else:
+        priority = 5
+
+    task_id = str(uuid.uuid4())
+    temp_docx_path = TEMP_DIR / f"{task_id}.docx"
+    daisy_zip_file_path = RESULTS_DIR / f"{task_id}.zip"
+    epub_file_path = RESULTS_DIR / f"{task_id}.epub"
+
+    try:
+        with open(temp_docx_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        queue = get_queue()
+        job = queue.enqueue(
+            process_docx_to_daisy_and_epub_task,
+            args=(
+                str(temp_docx_path),
+                str(daisy_zip_file_path),
+                str(epub_file_path),
+                title,
+                author,
+                publisher,
+                language,
+            ),
+            job_id=task_id,
+            timeout=6000,
+            job_timeout=6000,
+            result_ttl=86400,
+            ttl=86400,
+            priority=priority,
+        )
+
+        job_statuses[task_id] = {
+            "status": "queued",
+            "filename": file.filename,
+            "title": title,
+            "author": author,
+            "publisher": publisher,
+            "language": language,
+            "priority": priority,
+            "format": "docx_to_daisy_and_epub3",
+        }
+
+        return {
+            "task_id": task_id,
+            "status": "queued",
+            "message": "DOCX→DAISY→EPUB3 파이프라인 작업이 큐에 추가되었습니다. 상태 조회 API를 사용하여 작업 상태를 확인하세요.",
+        }
+
+    except HTTPException:
+        raise
+    except redis.ConnectionError as e:
+        if temp_docx_path.exists():
+            temp_docx_path.unlink()
+        raise HTTPException(status_code=503, detail=f"Redis 서버에 연결할 수 없습니다: {str(e)}")
+    except Exception as e:
+        if temp_docx_path.exists():
+            temp_docx_path.unlink()
+        raise HTTPException(status_code=500, detail=f"파이프라인 작업 등록 중 오류가 발생했습니다: {str(e)}")
 
 @app.post("/convert-daisy-to-epub")
 async def convert_daisy_to_epub(
