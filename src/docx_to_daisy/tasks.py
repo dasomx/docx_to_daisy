@@ -13,7 +13,7 @@ import json
 import zipfile
 from typing import Dict, Any, Optional
 
-from .converter.docxTodaisy import create_daisy_book, zip_daisy_output
+from .converter.docxTodaisy import create_daisy_book, create_daisy_book_with_validation, zip_daisy_output
 from .converter.docxToepub import create_epub3_book
 from .converter.daisyToepub import create_epub3_from_daisy, zip_epub_output
 
@@ -560,19 +560,35 @@ def process_docx_to_daisy_and_epub_task(
 
         daisy_output_dir.mkdir(exist_ok=True)
         logger.info("DAISY 파일 생성 시작")
-        create_daisy_book(
+        
+        # 진행 상황 콜백 함수 정의
+        def progress_callback(progress, message):
+            if job_id:
+                elapsed = time.time() - start_time
+                # DAISY 생성 단계는 15%에서 50%까지
+                adjusted_progress = 15 + (progress * 0.35)  # 15% ~ 50%
+                update_job_progress(job_id, int(adjusted_progress), f"{message} (경과: {elapsed:.1f}초)")
+        
+        # DAISY 파일 생성 및 검증
+        validation_result = create_daisy_book_with_validation(
             docx_file_path=file_path,
             output_dir=str(daisy_output_dir),
             book_title=title,
             book_author=author,
             book_publisher=publisher,
             book_language=language,
+            progress_callback=progress_callback
         )
-        logger.info("DAISY 파일 생성 완료")
+        logger.info("DAISY 파일 생성 및 검증 완료")
 
         if job_id:
             elapsed = time.time() - start_time
-            update_job_progress(job_id, 50, f"DAISY 생성 완료, ZIP 생성 중... (경과: {elapsed:.1f}초)", {"stage": "daisy_zip"})
+            # 검증 결과 요약을 메타데이터로 저장하여 API에서 노출 가능하도록 함
+            validation_summary = validation_result.get_summary() if hasattr(validation_result, "get_summary") else None
+            meta_update = {"stage": "daisy_zip"}
+            if validation_summary:
+                meta_update["validation_result"] = validation_summary
+            update_job_progress(job_id, 50, f"DAISY 생성 및 검증 완료, ZIP 생성 중... (경과: {elapsed:.1f}초)", meta_update)
 
         # DAISY ZIP 생성
         zip_daisy_output(str(daisy_output_dir), daisy_zip_output_path)
@@ -621,7 +637,7 @@ def process_docx_to_daisy_and_epub_task(
             update_job_progress(
                 job_id,
                 100,
-                f"파이프라인 작업이 완료되었습니다. (총 소요시간: {total_time:.1f}초)",
+                f"변환 및 검증이 완료되었습니다. (총 소요시간: {total_time:.1f}초)",
                 {
                     "output_paths": {
                         "daisy_zip": daisy_zip_output_path,

@@ -13,6 +13,7 @@ from datetime import datetime
 from docx_to_daisy.markers import MarkerProcessor  # 마커 처리기 임포트
 import gc
 from docx_to_daisy.converter.utils import find_all_images, split_text_to_words, analyze_image_context, html_escape, BR_PATTERN, TABLE_TITLE_PATTERN
+from docx_to_daisy.converter.validator import DaisyValidator, ValidationResult
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
@@ -1716,6 +1717,64 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
 
     # 타이밍 반환 (상위 호출자 기록용)
     return timings
+
+    
+def create_daisy_book_with_validation(docx_file_path, output_dir, book_title=None, book_author=None, book_publisher=None, book_language="ko", progress_callback=None):
+    """DOCX 파일을 DAISY 형식으로 변환하고 검증을 수행합니다.
+
+    Args:
+        docx_file_path (str): 변환할 DOCX 파일 경로
+        output_dir (str): 생성된 DAISY 파일 저장 폴더
+        book_title (str, optional): 책 제목. 기본값은 None (DOCX 파일명 사용)
+        book_author (str, optional): 저자. 기본값은 None
+        book_publisher (str, optional): 출판사. 기본값은 None
+        book_language (str, optional): 언어 코드 (ISO 639-1). 기본값은 "ko"
+        progress_callback (callable, optional): 진행 상황을 보고하는 콜백 함수
+    """
+    try:
+        # DAISY 파일 생성
+        create_daisy_book(docx_file_path, output_dir, book_title, book_author, book_publisher, book_language)
+        
+        # 검증 단계 시작
+        if progress_callback:
+            progress_callback(95, "DAISY 파일 검증 중...")
+        
+        print("DAISY 파일 검증 시작...")
+        
+        # DAISY 검증 수행
+        validator = DaisyValidator(output_dir)
+        validation_result = validator.validate_all()
+        
+        # 검증 결과 처리
+        if not validation_result.is_valid:
+            error_messages = [f"{error.category}: {error.message}" for error in validation_result.errors]
+            error_summary = "; ".join(error_messages[:3])  # 처음 3개 오류만 표시
+            if len(error_messages) > 3:
+                error_summary += f" 외 {len(error_messages) - 3}개 오류"
+            
+            raise ValueError(f"DAISY 파일 검증 실패: {error_summary}")
+        
+        # 경고가 있는 경우 로그로 출력
+        if validation_result.warnings:
+            warning_count = len(validation_result.warnings)
+            print(f"DAISY 파일 검증 완료: {warning_count}개의 경고가 있습니다.")
+            for warning in validation_result.warnings[:5]:  # 처음 5개 경고만 출력
+                print(f"  경고: {warning.category} - {warning.message}")
+            if len(validation_result.warnings) > 5:
+                print(f"  ... 외 {len(validation_result.warnings) - 5}개 경고")
+        else:
+            print("DAISY 파일 검증 완료: 모든 검증을 통과했습니다.")
+        
+        # 검증 완료 메시지
+        if progress_callback:
+            progress_callback(100, "변환 및 검증이 완료되었습니다.")
+        
+        return validation_result
+        
+    except Exception as e:
+        if progress_callback:
+            progress_callback(100, f"변환 실패: {str(e)}")
+        raise e
 
 
 def zip_daisy_output(source_dir, output_zip_filename):
