@@ -103,55 +103,33 @@ def find_all_images(document):
         'wp': 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing',
         'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
         'pic': 'http://schemas.openxmlformats.org/drawingml/2006/picture',
-        'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+        'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
+        'v': 'urn:schemas-microsoft-com:vml'
     }
     
+    # 네임스페이스 포함 XPath를 사전 컴파일 (호출 시 namespaces 키워드 사용 회피)
+    blip_xpath = etree.XPath('.//a:blip/@r:embed | .//v:imagedata/@r:embed', namespaces=nsmap)
+
     for para_idx, para in enumerate(document.paragraphs):
-        # 현재 단락의 전체 텍스트
-        current_para_text = para.text
-        
-        # 이전 단락의 텍스트 (있는 경우)
-        prev_para_text = document.paragraphs[para_idx-1].text if para_idx > 0 else ""
-        
-        # 다음 단락의 텍스트 (있는 경우)
-        next_para_text = document.paragraphs[para_idx+1].text if para_idx < len(document.paragraphs)-1 else ""
-        
         for run_idx, run in enumerate(para.runs):
-            # 이미지 요소 찾기 (네임스페이스 명시)
-            drawing = run._element.find('.//w:drawing', namespaces=nsmap)
-            pict = run._element.find('.//w:pict', namespaces=nsmap)
-            
-            if drawing is not None or pict is not None:
-                # 이미지 관계 ID 찾기
-                blip = None
-                if drawing is not None:
-                    blip = drawing.find('.//a:blip', namespaces=nsmap)
-                elif pict is not None:
-                    blip = pict.find('.//a:blip', namespaces=nsmap)
-                
-                if blip is not None:
-                    # 이미지 관계 ID 추출
-                    embed = blip.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
-                    if embed:
-                        # 이미지 데이터 가져오기
-                        image_part = document.part.related_parts[embed]
-                        image_data = image_part.blob
-                        
-                        # 이미지가 발견되면 앞뒤 텍스트 출력
-                        print(f"\n이미지 발견 (위치: 단락 {para_idx}, 런 {run_idx})")
-                        print(f"이전 단락: {prev_para_text}")
-                        print(f"현재 단락: {current_para_text}")
-                        print(f"다음 단락: {next_para_text}")
-                        print(f"이미지 크기: {len(image_data)} bytes")
-                        
-                        images.append({
-                            'paragraph_index': para_idx,
-                            'run_index': run_idx,
-                            'paragraph': para,
-                            'run': run,
-                            'image_data': image_data,
-                            'image_rid': embed
-                        })
+            # a:blip 또는 v:imagedata의 r:embed를 추출 (사전 컴파일된 XPath 사용)
+            rids = blip_xpath(run._element)
+            if not rids:
+                continue
+            embed = rids[0]
+            image_part = document.part.related_parts.get(embed)
+            if not image_part:
+                continue
+            image_data = image_part.blob
+
+            images.append({
+                'paragraph_index': para_idx,
+                'run_index': run_idx,
+                'paragraph': para,
+                'run': run,
+                'image_data': image_data,
+                'image_rid': embed
+            })
     return images
 
 
