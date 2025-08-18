@@ -5,6 +5,7 @@ import argparse
 import re
 import logging
 import html
+import time
 from docx import Document  # python-docx 라이브러리
 from docx.oxml.ns import qn  # XML 네임스페이스 처리
 from lxml import etree  # lxml 라이브러리
@@ -48,26 +49,33 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
         return None
     
     # --- 출력 디렉토리 생성 ---
+    timings = {}
+    t0 = time.time()
     os.makedirs(output_dir, exist_ok=True)
+    timings["init_output_dir"] = time.time() - t0
 
     # --- DOCX 파일 읽기 및 구조 분석 ---
     try:
+        t0 = time.time()
         document = Document(docx_file_path)
+        timings["load_docx"] = time.time() - t0
     except FileNotFoundError:
         print(f"오류: DOCX 파일을 찾을 수 없습니다 - {docx_file_path}")
-        return
+        return None
     except Exception as e:
         print(f"오류: DOCX 파일을 읽는 중 오류가 발생했습니다 - {str(e)}")
-        return
+        return None
 
     # --- 기본 정보 설정 ---
     # book_title 확인
+    t_validate = time.time()
     if book_title is None or not isinstance(book_title, str) or len(book_title.strip()) == 0:
         raise ValueError("책 제목이 제공되지 않았거나 유효하지 않습니다. 변환을 진행할 수 없습니다.")
     
     # book_author 확인
     if book_author is None or not isinstance(book_author, str) or len(book_author.strip()) == 0:
         raise ValueError("저자 정보가 제공되지 않았거나 유효하지 않습니다. 변환을 진행할 수 없습니다.")
+    timings["validate_metadata"] = time.time() - t_validate
 
     book_title = str(book_title)
     book_author = str(book_author)
@@ -175,6 +183,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
         return False
 
     # 1. 문서에서 모든 이미지 찾기 (표 안/밖 분류)
+    t_images = time.time()
     print("문서에서 이미지 찾는 중...")
     images = find_all_images(document)
     print(f"총 {len(images)}개의 이미지 발견")
@@ -196,6 +205,15 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             standalone_images.append(img)
     print(f"표 밖의 이미지: {len(standalone_images)}개")
     print(f"표 안의 이미지: {len(table_images)}개, 셀 안의 이미지: {len(cell_images)}개")
+
+    # 이미지 조회 성능 최적화를 위한 사전 매핑 (결과 동일성 유지)
+    cell_images_map = {}
+    for _img in cell_images:
+        cell_images_map.setdefault(_img['ancestor_id'], []).append(_img)
+
+    table_images_map = {}
+    for _img in table_images:
+        table_images_map.setdefault(_img['ancestor_id'], []).append(_img)
     
     # 2. 문서에서 모든 이미지 관계 미리 수집 (성능 최적화)
     print(f"문서에서 이미지 관계 수집 중...")
@@ -270,6 +288,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             continue
 
     print(f"{image_counter}개 이미지 추출 완료.")
+    timings["extract_images"] = time.time() - t_images
 
     # 메모리 정리 (images는 표 처리에서도 사용하므로 유지)
     del image_relations
@@ -277,6 +296,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     gc.collect()
 
     # DOCX의 단락(paragraph)을 순회하며 구조 파악
+    t_paragraphs = time.time()
     print("DOCX 파일 분석 중...")
     print(f"총 {len(document.paragraphs)}개의 단락을 처리합니다.")
     
@@ -387,8 +407,10 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             })
     
     print(f"단락 처리 완료: 총 {len(content_structure)}개의 구조 요소 생성")
+    timings["parse_paragraphs"] = time.time() - t_paragraphs
 
     # 표 처리
+    t_tables = time.time()
     print("표 처리 중...")
     
     # body_children에서 모든 요소의 위치를 미리 계산 (성능 최적화)
@@ -548,10 +570,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             
             # 표 안의 이미지 찾기 (인덱싱 구조 활용)
             tid = id(table._element)
-            this_table_images = []
-            for img in table_images + cell_images:
-                if img['ancestor_id'] == tid:
-                    this_table_images.append(img)
+            this_table_images = table_images_map.get(tid, [])
             
             print(f"표 {table_idx} 안에 {len(this_table_images)}개의 이미지 발견")
             
@@ -564,10 +583,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                     
                     # 셀 안의 이미지 찾기 (인덱싱 구조 활용)
                     cid = id(cell._element)
-                    cell_images_in_cell = []
-                    for img in cell_images:
-                        if img['ancestor_id'] == cid:
-                            cell_images_in_cell.append(img)
+                    cell_images_in_cell = cell_images_map.get(cid, [])
                     
                     # 미리 계산된 셀 병합 정보 사용 (좌표 기반)
                     merge_info = cell_merge_info[tid].get((row_idx, col_idx), {
@@ -656,6 +672,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             print(f"표 {table_idx} 처리 완료: {len(table_data['rows'])}행 x {len(table_data['cols'])}열, 문서 위치: {table_document_position}")
     else:
         print("문서에 표가 없습니다.")
+    timings["process_tables"] = time.time() - t_tables
 
     # 메모리 정리 (모든 처리 완료 후)
     # 변수가 정의된 경우에만 삭제
@@ -681,6 +698,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     gc.collect()
 
     # 콘텐츠를 위치에 따라 정렬 - 이미지와 텍스트의 정확한 순서 보장
+    t_sort = time.time()
     content_structure.sort(key=lambda x: (
         x["position"],  # 기본 위치 (단락 순서)
         x.get("run_index", 0) if x["type"] == "image" else 0,  # 이미지의 경우 런 인덱스 고려
@@ -688,8 +706,10 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     ))
 
     print(f"총 {len(content_structure)}개의 구조 요소 분석 완료.")
+    timings["sort_content"] = time.time() - t_sort
 
     # --- 1. DTBook XML 생성 (dtbook.xml) ---
+    t_dtbook = time.time()
     print("DTBook 생성 중...")
     dtbook_ns = "http://www.daisy.org/z3986/2005/dtbook/"
     dc_ns = "http://purl.org/dc/elements/1.1/"
@@ -1092,8 +1112,10 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                   method='xml')
 
     print(f"DTBook 생성 완료: {dtbook_filepath}")
+    timings["generate_dtbook"] = time.time() - t_dtbook
 
     # --- 2. OPF 파일 생성 (dtbook.opf) ---
+    t_opf = time.time()
     print("OPF 생성 중...")
     opf_ns = "http://openebook.org/namespaces/oeb-package/1.0/"
     dc_ns = "http://purl.org/dc/elements/1.1/"
@@ -1270,8 +1292,10 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                   method='xml')
 
     print(f"OPF 생성 완료: {opf_filepath}")
+    timings["generate_opf"] = time.time() - t_opf
 
     # --- 3. SMIL 파일 생성 (dtbook.smil) ---
+    t_smil = time.time()
     print("SMIL 파일 생성 중...")
 
     smil_ns = "http://www.w3.org/2001/SMIL20/"
@@ -1391,8 +1415,10 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                   method='xml')
 
     print(f"SMIL 파일 생성 완료: {smil_filepath}")
+    timings["generate_smil"] = time.time() - t_smil
 
     # --- 4. NCX 파일 생성 (dtbook.ncx) ---
+    t_ncx = time.time()
     print("NCX 생성 중...")
     ncx_ns = "http://www.daisy.org/z3986/2005/ncx/"
 
@@ -1603,8 +1629,10 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                    xml_declaration=False)
 
     print(f"NCX 생성 완료: {ncx_filepath}")
+    timings["generate_ncx"] = time.time() - t_ncx
 
     # --- 5. Resources 파일 생성 (dtbook.res) ---
+    t_res = time.time()
     print("Resources 생성 중...")
     res_ns = "http://www.daisy.org/z3986/2005/resource/"
 
@@ -1674,6 +1702,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                    xml_declaration=False)
 
     print(f"Resources 생성 완료: {res_filepath}")
+    timings["generate_resources"] = time.time() - t_res
 
     print("\n--- DAISY 기본 파일 생성 완료 ---")
     print(f"생성된 파일은 '{output_dir}' 폴더에 있습니다.")
@@ -1684,6 +1713,9 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     if 'image_relations' in locals():
         del image_relations
     gc.collect()
+
+    # 타이밍 반환 (상위 호출자 기록용)
+    return timings
 
 
 def zip_daisy_output(source_dir, output_zip_filename):

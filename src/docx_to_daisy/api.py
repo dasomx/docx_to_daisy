@@ -287,12 +287,15 @@ async def get_task_status(task_id: str = FastAPIPath(..., description="변환 �
                 start_time = job_meta.get('start_time')
                 total_time = job_meta.get('total_time')
                 elapsed_time = job_meta.get('elapsed_time')
+                stage_times = job_meta.get('stage_times')
                 
                 response.update({
                     "progress": progress,
                     "message": message,
                     "updated_at": updated_at
                 })
+                if stage_times:
+                    response["stage_times"] = stage_times
                 
                 # 시간 정보 추가
                 if start_time:

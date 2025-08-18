@@ -130,6 +130,7 @@ def process_conversion_task(file_path, output_path, title=None, author=None, pub
     output_dir = None
     
     try:
+        stage_times: Dict[str, float] = {}
         if job_id:
             update_job_progress(job_id, 0, "변환 작업이 시작되었습니다.", {"start_time": start_time})
         
@@ -146,6 +147,7 @@ def process_conversion_task(file_path, output_path, title=None, author=None, pub
             update_job_progress(job_id, 10, f"DOCX 파일 검증 중... (경과: {elapsed_time:.1f}초)")
         
         # 파일 존재 확인
+        t_validate_docx = time.time()
         if not os.path.exists(file_path):
             error_msg = f"DOCX 파일을 찾을 수 없습니다: {file_path}"
             logger.error(error_msg)
@@ -153,6 +155,7 @@ def process_conversion_task(file_path, output_path, title=None, author=None, pub
                 elapsed_time = time.time() - start_time
                 update_job_progress(job_id, -1, error_msg, {"elapsed_time": elapsed_time})
             raise FileNotFoundError(error_msg)
+        stage_times["validate_docx"] = time.time() - t_validate_docx
         
         # DAISY 파일 생성
         if job_id:
@@ -160,7 +163,8 @@ def process_conversion_task(file_path, output_path, title=None, author=None, pub
             update_job_progress(job_id, 20, f"DAISY 파일 생성 중... (경과: {elapsed_time:.1f}초)")
         
         logger.info("DAISY 파일 생성 시작")
-        create_daisy_book(
+        t_daisy = time.time()
+        daisy_timings = create_daisy_book(
             docx_file_path=file_path,
             output_dir=str(output_dir),
             book_title=title,
@@ -168,6 +172,10 @@ def process_conversion_task(file_path, output_path, title=None, author=None, pub
             book_publisher=publisher,
             book_language=language
         )
+        # 내부 단계별 시간 병합
+        if isinstance(daisy_timings, dict):
+            stage_times.update(daisy_timings)
+        stage_times["generate_daisy_total"] = time.time() - t_daisy
         logger.info("DAISY 파일 생성 완료")
         
         if job_id:
@@ -176,7 +184,9 @@ def process_conversion_task(file_path, output_path, title=None, author=None, pub
         
         # ZIP 파일 생성
         logger.info("ZIP 파일 생성 시작")
+        t_zip = time.time()
         zip_daisy_output(str(output_dir), output_path)
+        stage_times["zip_output"] = time.time() - t_zip
         logger.info(f"ZIP 파일 생성 완료: {output_path}")
         
         if job_id:
@@ -184,7 +194,9 @@ def process_conversion_task(file_path, output_path, title=None, author=None, pub
             update_job_progress(job_id, 95, f"ZIP 파일 생성 완료, 임시 파일 정리 중... (경과: {elapsed_time:.1f}초)")
         
         # 임시 파일 정리
+        t_cleanup = time.time()
         cleanup_temp_files(output_dir)
+        stage_times["cleanup"] = time.time() - t_cleanup
         
         # 총 소요 시간 계산
         total_time = time.time() - start_time
@@ -193,7 +205,8 @@ def process_conversion_task(file_path, output_path, title=None, author=None, pub
             update_job_progress(job_id, 100, f"변환 작업이 완료되었습니다. (총 소요시간: {total_time:.1f}초)", {
                 "output_path": output_path,
                 "total_time": total_time,
-                "elapsed_time": total_time
+                "elapsed_time": total_time,
+                "stage_times": stage_times
             })
         
         return output_path
