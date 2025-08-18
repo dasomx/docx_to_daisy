@@ -261,10 +261,10 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             image_filename = f"image{img_num}{image_ext}"
             image_path = os.path.join(output_dir, image_filename)
             
-            # 이미지 데이터 저장
-            with open(image_path, "wb") as img_file:
+            # 이미지 데이터 저장(큰 버퍼)
+            with open(image_path, "wb", buffering=1<<20) as img_file:
                 img_file.write(img['image_data'])
-            print(f"이미지 {img_num} 저장: {image_path}")
+            # 상세 콘솔 출력 제거 (성능)
             
             # 이미지 정보를 content_structure에 추가 - 실제 문서 위치 사용
             document_position = get_image_document_position(img['paragraph_index'], img['run_index'])
@@ -282,7 +282,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                 "para_index": img['paragraph_index'],  # 단락 인덱스 추가
                 "run_index": img['run_index']  # 런 인덱스 추가
             })
-            print(f"이미지 {img_num}를 content_structure에 추가함 (문서 위치: {document_position}, 단락: {img['paragraph_index']}, 런: {img['run_index']})")
+            # 상세 콘솔 출력 제거 (성능)
         except Exception as e:
             print(f"이미지 {img_num} 처리 중 오류 발생: {str(e)}")
             continue
