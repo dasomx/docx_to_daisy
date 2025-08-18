@@ -71,36 +71,24 @@ def split_text_to_words(text):
 
     result = []
     for word in words:
-        # 2. 각 단어에서 문장 부호가 있는지 확인
-        if PUNCTUATION_PATTERN.search(word):
-            # 문장 부호가 단어 중간에 있는 경우는 그대로 유지
-            if not PUNCTUATION_PATTERN.match(word) and not PUNCTUATION_PATTERN.search(word + '$'):
-                result.append(word)
-                continue
+        # 문장 부호가 없는 경우 그대로 반환
+        if not PUNCTUATION_PATTERN.search(word):
+            result.append(word)
+            continue
 
-            # 문장 부호로 시작하는 경우
-            match = PUNCTUATION_PATTERN.match(word)
-            if match:
-                punct = match.group(0)
-                remaining = word[len(punct):]
-                if punct:
-                    result.append(punct)
-                if remaining:
-                    result.append(remaining)
-                continue
+        # 문장 부호로 시작하는 경우만 분리
+        start_match = re.match(r'^([.。,，!！?？:：;；]+)(.+)$', word)
+        if start_match:
+            result.append(start_match.group(1))
+            result.append(start_match.group(2))
+            continue
 
-            # 문장 부호로 끝나는 경우
-            match = PUNCTUATION_PATTERN.search(word)
-            if match:
-                punct = match.group(0)
-                text_part = word[:-len(punct)]
-                if text_part:
-                    result.append(text_part + punct)  # 문장 부호를 단어에 붙임
-                else:
-                    result.append(punct)
-                continue
+        # 문장 부호가 단어 끝에 있는 경우는 변경하지 않고 그대로 둠
+        if re.search(r'[.。,，!！?？:：;；]+$', word):
+            result.append(word)
+            continue
 
-        # 문장 부호가 없는 일반 단어
+        # 그 외(문장 부호가 단어 중간에 있는 경우)는 원형 유지
         result.append(word)
 
     return result
