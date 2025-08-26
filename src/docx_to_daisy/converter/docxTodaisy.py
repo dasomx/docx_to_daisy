@@ -5,6 +5,7 @@ import argparse
 import re
 import logging
 import html
+import time
 from docx import Document  # python-docx 라이브러리
 from docx.oxml.ns import qn  # XML 네임스페이스 처리
 from lxml import etree  # lxml 라이브러리
@@ -12,6 +13,7 @@ from datetime import datetime
 from docx_to_daisy.markers import MarkerProcessor  # 마커 처리기 임포트
 import gc
 from docx_to_daisy.converter.utils import find_all_images, split_text_to_words, analyze_image_context, html_escape, BR_PATTERN, TABLE_TITLE_PATTERN
+from docx_to_daisy.converter.validator import DaisyValidator, ValidationResult
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
@@ -48,26 +50,33 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
         return None
     
     # --- 출력 디렉토리 생성 ---
+    timings = {}
+    t0 = time.time()
     os.makedirs(output_dir, exist_ok=True)
+    timings["init_output_dir"] = time.time() - t0
 
     # --- DOCX 파일 읽기 및 구조 분석 ---
     try:
+        t0 = time.time()
         document = Document(docx_file_path)
+        timings["load_docx"] = time.time() - t0
     except FileNotFoundError:
         print(f"오류: DOCX 파일을 찾을 수 없습니다 - {docx_file_path}")
-        return
+        return None
     except Exception as e:
         print(f"오류: DOCX 파일을 읽는 중 오류가 발생했습니다 - {str(e)}")
-        return
+        return None
 
     # --- 기본 정보 설정 ---
     # book_title 확인
+    t_validate = time.time()
     if book_title is None or not isinstance(book_title, str) or len(book_title.strip()) == 0:
         raise ValueError("책 제목이 제공되지 않았거나 유효하지 않습니다. 변환을 진행할 수 없습니다.")
     
     # book_author 확인
     if book_author is None or not isinstance(book_author, str) or len(book_author.strip()) == 0:
         raise ValueError("저자 정보가 제공되지 않았거나 유효하지 않습니다. 변환을 진행할 수 없습니다.")
+    timings["validate_metadata"] = time.time() - t_validate
 
     book_title = str(book_title)
     book_author = str(book_author)
@@ -175,6 +184,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
         return False
 
     # 1. 문서에서 모든 이미지 찾기 (표 안/밖 분류)
+    t_images = time.time()
     print("문서에서 이미지 찾는 중...")
     images = find_all_images(document)
     print(f"총 {len(images)}개의 이미지 발견")
@@ -196,6 +206,15 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             standalone_images.append(img)
     print(f"표 밖의 이미지: {len(standalone_images)}개")
     print(f"표 안의 이미지: {len(table_images)}개, 셀 안의 이미지: {len(cell_images)}개")
+
+    # 이미지 조회 성능 최적화를 위한 사전 매핑 (결과 동일성 유지)
+    cell_images_map = {}
+    for _img in cell_images:
+        cell_images_map.setdefault(_img['ancestor_id'], []).append(_img)
+
+    table_images_map = {}
+    for _img in table_images:
+        table_images_map.setdefault(_img['ancestor_id'], []).append(_img)
     
     # 2. 문서에서 모든 이미지 관계 미리 수집 (성능 최적화)
     print(f"문서에서 이미지 관계 수집 중...")
@@ -243,10 +262,10 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             image_filename = f"image{img_num}{image_ext}"
             image_path = os.path.join(output_dir, image_filename)
             
-            # 이미지 데이터 저장
-            with open(image_path, "wb") as img_file:
+            # 이미지 데이터 저장(큰 버퍼)
+            with open(image_path, "wb", buffering=1<<20) as img_file:
                 img_file.write(img['image_data'])
-            print(f"이미지 {img_num} 저장: {image_path}")
+            # 상세 콘솔 출력 제거 (성능)
             
             # 이미지 정보를 content_structure에 추가 - 실제 문서 위치 사용
             document_position = get_image_document_position(img['paragraph_index'], img['run_index'])
@@ -264,12 +283,13 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                 "para_index": img['paragraph_index'],  # 단락 인덱스 추가
                 "run_index": img['run_index']  # 런 인덱스 추가
             })
-            print(f"이미지 {img_num}를 content_structure에 추가함 (문서 위치: {document_position}, 단락: {img['paragraph_index']}, 런: {img['run_index']})")
+            # 상세 콘솔 출력 제거 (성능)
         except Exception as e:
             print(f"이미지 {img_num} 처리 중 오류 발생: {str(e)}")
             continue
 
     print(f"{image_counter}개 이미지 추출 완료.")
+    timings["extract_images"] = time.time() - t_images
 
     # 메모리 정리 (images는 표 처리에서도 사용하므로 유지)
     del image_relations
@@ -277,6 +297,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     gc.collect()
 
     # DOCX의 단락(paragraph)을 순회하며 구조 파악
+    t_paragraphs = time.time()
     print("DOCX 파일 분석 중...")
     print(f"총 {len(document.paragraphs)}개의 단락을 처리합니다.")
     
@@ -350,28 +371,19 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             # 단어 분리
             words = split_text_to_words(processed_text)
 
-            # 스타일 이름에 따른 구조 매핑 (미리 계산)
+            # 스타일 이름에 따른 구조 매핑 (견고하게 처리)
             element_type = "p"
             element_level = 0
-            
-            if style_name.startswith('heading 1') or style_name == '제목 1':
-                element_type = "h1"
-                element_level = 1
-            elif style_name.startswith('heading 2') or style_name == '제목 2':
-                element_type = "h2"
-                element_level = 2
-            elif style_name.startswith('heading 3') or style_name == '제목 3':
-                element_type = "h3"
-                element_level = 3
-            elif style_name.startswith('heading 4') or style_name == '제목 4':
-                element_type = "h4"
-                element_level = 4
-            elif style_name.startswith('heading 5') or style_name == '제목 5':
-                element_type = "h5"
-                element_level = 5
-            elif style_name.startswith('heading 6') or style_name == '제목 6':
-                element_type = "h6"
-                element_level = 6
+
+            # 스타일 이름 정규화 및 다양한 변형 대응
+            normalized_style = (style_name or "").strip().lower()
+            normalized_style = re.sub(r"\s+", " ", normalized_style)
+            # 예: "Heading 1", "heading1", "제목 1", "제목1", "Heading 2 + Bold", 등
+            heading_match = re.search(r"(?:heading|제목)\s*([1-6])\b", normalized_style)
+            if heading_match:
+                level_num = int(heading_match.group(1))
+                element_type = f"h{level_num}"
+                element_level = level_num
 
             # 스타일 이름에 따른 구조 매핑
             content_structure.append({
@@ -387,8 +399,10 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             })
     
     print(f"단락 처리 완료: 총 {len(content_structure)}개의 구조 요소 생성")
+    timings["parse_paragraphs"] = time.time() - t_paragraphs
 
     # 표 처리
+    t_tables = time.time()
     print("표 처리 중...")
     
     # body_children에서 모든 요소의 위치를 미리 계산 (성능 최적화)
@@ -548,10 +562,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             
             # 표 안의 이미지 찾기 (인덱싱 구조 활용)
             tid = id(table._element)
-            this_table_images = []
-            for img in table_images + cell_images:
-                if img['ancestor_id'] == tid:
-                    this_table_images.append(img)
+            this_table_images = table_images_map.get(tid, [])
             
             print(f"표 {table_idx} 안에 {len(this_table_images)}개의 이미지 발견")
             
@@ -564,10 +575,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                     
                     # 셀 안의 이미지 찾기 (인덱싱 구조 활용)
                     cid = id(cell._element)
-                    cell_images_in_cell = []
-                    for img in cell_images:
-                        if img['ancestor_id'] == cid:
-                            cell_images_in_cell.append(img)
+                    cell_images_in_cell = cell_images_map.get(cid, [])
                     
                     # 미리 계산된 셀 병합 정보 사용 (좌표 기반)
                     merge_info = cell_merge_info[tid].get((row_idx, col_idx), {
@@ -656,6 +664,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             print(f"표 {table_idx} 처리 완료: {len(table_data['rows'])}행 x {len(table_data['cols'])}열, 문서 위치: {table_document_position}")
     else:
         print("문서에 표가 없습니다.")
+    timings["process_tables"] = time.time() - t_tables
 
     # 메모리 정리 (모든 처리 완료 후)
     # 변수가 정의된 경우에만 삭제
@@ -681,6 +690,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     gc.collect()
 
     # 콘텐츠를 위치에 따라 정렬 - 이미지와 텍스트의 정확한 순서 보장
+    t_sort = time.time()
     content_structure.sort(key=lambda x: (
         x["position"],  # 기본 위치 (단락 순서)
         x.get("run_index", 0) if x["type"] == "image" else 0,  # 이미지의 경우 런 인덱스 고려
@@ -688,8 +698,10 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     ))
 
     print(f"총 {len(content_structure)}개의 구조 요소 분석 완료.")
+    timings["sort_content"] = time.time() - t_sort
 
     # --- 1. DTBook XML 생성 (dtbook.xml) ---
+    t_dtbook = time.time()
     print("DTBook 생성 중...")
     dtbook_ns = "http://www.daisy.org/z3986/2005/dtbook/"
     dc_ns = "http://purl.org/dc/elements/1.1/"
@@ -1092,8 +1104,10 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                   method='xml')
 
     print(f"DTBook 생성 완료: {dtbook_filepath}")
+    timings["generate_dtbook"] = time.time() - t_dtbook
 
     # --- 2. OPF 파일 생성 (dtbook.opf) ---
+    t_opf = time.time()
     print("OPF 생성 중...")
     opf_ns = "http://openebook.org/namespaces/oeb-package/1.0/"
     dc_ns = "http://purl.org/dc/elements/1.1/"
@@ -1270,8 +1284,10 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                   method='xml')
 
     print(f"OPF 생성 완료: {opf_filepath}")
+    timings["generate_opf"] = time.time() - t_opf
 
     # --- 3. SMIL 파일 생성 (dtbook.smil) ---
+    t_smil = time.time()
     print("SMIL 파일 생성 중...")
 
     smil_ns = "http://www.w3.org/2001/SMIL20/"
@@ -1391,8 +1407,10 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                   method='xml')
 
     print(f"SMIL 파일 생성 완료: {smil_filepath}")
+    timings["generate_smil"] = time.time() - t_smil
 
     # --- 4. NCX 파일 생성 (dtbook.ncx) ---
+    t_ncx = time.time()
     print("NCX 생성 중...")
     ncx_ns = "http://www.daisy.org/z3986/2005/ncx/"
 
@@ -1408,6 +1426,17 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
 
     # head
     head = etree.SubElement(ncx_root, "head")
+    # 최대 제목 레벨 계산 (dtb:depth 반영)
+    max_heading_level = 0
+    for _item in content_structure:
+        if isinstance(_item.get("type"), str) and _item["type"].startswith("h"):
+            try:
+                max_heading_level = max(max_heading_level, int(_item["type"][1]))
+            except Exception:
+                pass
+    if max_heading_level <= 0:
+        max_heading_level = 1
+
     etree.SubElement(head, "meta",
                      name="dc:Identifier",
                      content=book_uid)
@@ -1425,7 +1454,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                      content=book_language)
     etree.SubElement(head, "meta",
                      name="dtb:depth",
-                     content="3")  # 최대 제목 레벨
+                     content=str(min(6, max_heading_level)))
     etree.SubElement(head, "meta",
                      name="dtb:totalPageCount",
                      content=str(total_pages))
@@ -1475,53 +1504,44 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
 
     # 목차 항목 생성 (제목만 포함, 표 제외)
     play_order = 1
-    current_level1_point = None
-    current_level2_point = None
-    current_level3_point = None
-    current_level4_point = None
-    current_level5_point = None
+    level_stack = [None] * 7  # 1~6 사용
 
     for item in content_structure:
-        if item["type"].startswith("h"):
-            level = int(item["type"][1])  # h1 -> 1, h2 -> 2, h3 -> 3, h4 -> 4, h5 -> 5, h6 -> 6
-            nav_point = etree.Element("navPoint",
-                                     id=f"ncx_{item['id']}",
-                                     **{"class": f"level{level}"},
-                                     playOrder=str(play_order))
+        if isinstance(item.get("type"), str) and item["type"].startswith("h"):
+            try:
+                level = int(item["type"][1])  # h1 -> 1, ..., h6 -> 6
+            except Exception:
+                continue
+
+            nav_point = etree.Element(
+                "navPoint",
+                id=f"ncx_{item['id']}",
+                **{"class": f"level{level}"},
+                playOrder=str(play_order)
+            )
             nav_label = etree.SubElement(nav_point, "navLabel")
             text = etree.SubElement(nav_label, "text")
-            text.text = item["text"]
-            content = etree.SubElement(nav_point, "content",
-                                       src=f"dtbook.smil#smil_par_{item['id']}")
+            label_text = item.get("text") or " ".join(item.get("words", [])) or "제목 없음"
+            text.text = label_text
+            etree.SubElement(nav_point, "content",
+                             src=f"dtbook.smil#smil_par_{item['id']}")
 
-            # 계층 구조에 맞게 배치
-            if level == 1:
+            # 부모 찾기: 현재 레벨보다 작은 가장 가까운 상위 레벨
+            parent = None
+            for pl in range(level - 1, 0, -1):
+                if level_stack[pl] is not None:
+                    parent = level_stack[pl]
+                    break
+
+            if parent is None:
                 nav_map.append(nav_point)
-                current_level1_point = nav_point
-                current_level2_point = None
-                current_level3_point = None
-                current_level4_point = None
-                current_level5_point = None
-            elif level == 2 and current_level1_point is not None:
-                current_level1_point.append(nav_point)
-                current_level2_point = nav_point
-                current_level3_point = None
-                current_level4_point = None
-                current_level5_point = None
-            elif level == 3 and current_level2_point is not None:
-                current_level2_point.append(nav_point)
-                current_level3_point = nav_point
-                current_level4_point = None
-                current_level5_point = None
-            elif level == 4 and current_level3_point is not None:
-                current_level3_point.append(nav_point)
-                current_level4_point = nav_point
-                current_level5_point = None
-            elif level == 5 and current_level4_point is not None:
-                current_level4_point.append(nav_point)
-                current_level5_point = nav_point
-            elif level == 6 and current_level5_point is not None:
-                current_level5_point.append(nav_point)
+            else:
+                parent.append(nav_point)
+
+            # 스택 갱신
+            level_stack[level] = nav_point
+            for clr in range(level + 1, 7):
+                level_stack[clr] = None
 
             play_order += 1
 
@@ -1603,8 +1623,10 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                    xml_declaration=False)
 
     print(f"NCX 생성 완료: {ncx_filepath}")
+    timings["generate_ncx"] = time.time() - t_ncx
 
     # --- 5. Resources 파일 생성 (dtbook.res) ---
+    t_res = time.time()
     print("Resources 생성 중...")
     res_ns = "http://www.daisy.org/z3986/2005/resource/"
 
@@ -1674,6 +1696,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                    xml_declaration=False)
 
     print(f"Resources 생성 완료: {res_filepath}")
+    timings["generate_resources"] = time.time() - t_res
 
     print("\n--- DAISY 기본 파일 생성 완료 ---")
     print(f"생성된 파일은 '{output_dir}' 폴더에 있습니다.")
@@ -1684,6 +1707,67 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     if 'image_relations' in locals():
         del image_relations
     gc.collect()
+
+    # 타이밍 반환 (상위 호출자 기록용)
+    return timings
+
+    
+def create_daisy_book_with_validation(docx_file_path, output_dir, book_title=None, book_author=None, book_publisher=None, book_language="ko", progress_callback=None):
+    """DOCX 파일을 DAISY 형식으로 변환하고 검증을 수행합니다.
+
+    Args:
+        docx_file_path (str): 변환할 DOCX 파일 경로
+        output_dir (str): 생성된 DAISY 파일 저장 폴더
+        book_title (str, optional): 책 제목. 기본값은 None (DOCX 파일명 사용)
+        book_author (str, optional): 저자. 기본값은 None
+        book_publisher (str, optional): 출판사. 기본값은 None
+        book_language (str, optional): 언어 코드 (ISO 639-1). 기본값은 "ko"
+        progress_callback (callable, optional): 진행 상황을 보고하는 콜백 함수
+    """
+    try:
+        # DAISY 파일 생성
+        create_daisy_book(docx_file_path, output_dir, book_title, book_author, book_publisher, book_language)
+        
+        # 검증 단계 시작
+        if progress_callback:
+            progress_callback(95, "DAISY 파일 검증 중...")
+        
+        print("DAISY 파일 검증 시작...")
+        
+        # DAISY 검증 수행
+        validator = DaisyValidator(output_dir)
+        validation_result = validator.validate_all()
+        
+        # 검증 결과 처리
+        if not validation_result.is_valid:
+            error_messages = [f"{error.category}: {error.message}" for error in validation_result.errors]
+            error_summary = "; ".join(error_messages[:3])  # 처음 3개 오류만 표시
+            if len(error_messages) > 3:
+                error_summary += f" 외 {len(error_messages) - 3}개 오류"
+            
+            raise ValueError(f"DAISY 파일 검증 실패: {error_summary}")
+        
+        # 경고가 있는 경우 로그로 출력
+        if validation_result.warnings:
+            warning_count = len(validation_result.warnings)
+            print(f"DAISY 파일 검증 완료: {warning_count}개의 경고가 있습니다.")
+            for warning in validation_result.warnings[:5]:  # 처음 5개 경고만 출력
+                print(f"  경고: {warning.category} - {warning.message}")
+            if len(validation_result.warnings) > 5:
+                print(f"  ... 외 {len(validation_result.warnings) - 5}개 경고")
+        else:
+            print("DAISY 파일 검증 완료: 모든 검증을 통과했습니다.")
+        
+        # 검증 완료 메시지
+        if progress_callback:
+            progress_callback(100, "변환 및 검증이 완료되었습니다.")
+        
+        return validation_result
+        
+    except Exception as e:
+        if progress_callback:
+            progress_callback(100, f"변환 실패: {str(e)}")
+        raise e
 
 
 def zip_daisy_output(source_dir, output_zip_filename):

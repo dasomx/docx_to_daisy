@@ -19,7 +19,7 @@ from starlette.types import ASGIApp
 from fastapi.params import Path as FastAPIPath
 from rq.worker import Worker
 
-from .converter.docxTodaisy import create_daisy_book, zip_daisy_output
+from .converter.docxTodaisy import create_daisy_book, create_daisy_book_with_validation, zip_daisy_output
 from .converter.docxToepub import create_epub3_book
 from .converter.daisyToepub import create_epub3_from_daisy, zip_epub_output
 from .tasks import (
@@ -287,12 +287,15 @@ async def get_task_status(task_id: str = FastAPIPath(..., description="변환 �
                 start_time = job_meta.get('start_time')
                 total_time = job_meta.get('total_time')
                 elapsed_time = job_meta.get('elapsed_time')
+                stage_times = job_meta.get('stage_times')
                 
                 response.update({
                     "progress": progress,
                     "message": message,
                     "updated_at": updated_at
                 })
+                if stage_times:
+                    response["stage_times"] = stage_times
                 
                 # 시간 정보 추가
                 if start_time:
@@ -325,6 +328,10 @@ async def get_task_status(task_id: str = FastAPIPath(..., description="변환 �
                     "publisher": job_statuses[task_id].get("publisher"),
                     "language": job_statuses[task_id].get("language")
                 })
+            
+            # 검증 결과 정보 추가 (있는 경우)
+            if job_meta and 'validation_result' in job_meta:
+                response["validation_result"] = job_meta['validation_result']
             
             # 오류 정보 추가
             if error:
