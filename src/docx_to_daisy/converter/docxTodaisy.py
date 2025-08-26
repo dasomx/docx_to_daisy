@@ -371,28 +371,19 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             # 단어 분리
             words = split_text_to_words(processed_text)
 
-            # 스타일 이름에 따른 구조 매핑 (미리 계산)
+            # 스타일 이름에 따른 구조 매핑 (견고하게 처리)
             element_type = "p"
             element_level = 0
-            
-            if style_name.startswith('heading 1') or style_name == '제목 1':
-                element_type = "h1"
-                element_level = 1
-            elif style_name.startswith('heading 2') or style_name == '제목 2':
-                element_type = "h2"
-                element_level = 2
-            elif style_name.startswith('heading 3') or style_name == '제목 3':
-                element_type = "h3"
-                element_level = 3
-            elif style_name.startswith('heading 4') or style_name == '제목 4':
-                element_type = "h4"
-                element_level = 4
-            elif style_name.startswith('heading 5') or style_name == '제목 5':
-                element_type = "h5"
-                element_level = 5
-            elif style_name.startswith('heading 6') or style_name == '제목 6':
-                element_type = "h6"
-                element_level = 6
+
+            # 스타일 이름 정규화 및 다양한 변형 대응
+            normalized_style = (style_name or "").strip().lower()
+            normalized_style = re.sub(r"\s+", " ", normalized_style)
+            # 예: "Heading 1", "heading1", "제목 1", "제목1", "Heading 2 + Bold", 등
+            heading_match = re.search(r"(?:heading|제목)\s*([1-6])\b", normalized_style)
+            if heading_match:
+                level_num = int(heading_match.group(1))
+                element_type = f"h{level_num}"
+                element_level = level_num
 
             # 스타일 이름에 따른 구조 매핑
             content_structure.append({
@@ -1435,6 +1426,17 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
 
     # head
     head = etree.SubElement(ncx_root, "head")
+    # 최대 제목 레벨 계산 (dtb:depth 반영)
+    max_heading_level = 0
+    for _item in content_structure:
+        if isinstance(_item.get("type"), str) and _item["type"].startswith("h"):
+            try:
+                max_heading_level = max(max_heading_level, int(_item["type"][1]))
+            except Exception:
+                pass
+    if max_heading_level <= 0:
+        max_heading_level = 1
+
     etree.SubElement(head, "meta",
                      name="dc:Identifier",
                      content=book_uid)
@@ -1452,7 +1454,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                      content=book_language)
     etree.SubElement(head, "meta",
                      name="dtb:depth",
-                     content="3")  # 최대 제목 레벨
+                     content=str(min(6, max_heading_level)))
     etree.SubElement(head, "meta",
                      name="dtb:totalPageCount",
                      content=str(total_pages))
@@ -1502,53 +1504,44 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
 
     # 목차 항목 생성 (제목만 포함, 표 제외)
     play_order = 1
-    current_level1_point = None
-    current_level2_point = None
-    current_level3_point = None
-    current_level4_point = None
-    current_level5_point = None
+    level_stack = [None] * 7  # 1~6 사용
 
     for item in content_structure:
-        if item["type"].startswith("h"):
-            level = int(item["type"][1])  # h1 -> 1, h2 -> 2, h3 -> 3, h4 -> 4, h5 -> 5, h6 -> 6
-            nav_point = etree.Element("navPoint",
-                                     id=f"ncx_{item['id']}",
-                                     **{"class": f"level{level}"},
-                                     playOrder=str(play_order))
+        if isinstance(item.get("type"), str) and item["type"].startswith("h"):
+            try:
+                level = int(item["type"][1])  # h1 -> 1, ..., h6 -> 6
+            except Exception:
+                continue
+
+            nav_point = etree.Element(
+                "navPoint",
+                id=f"ncx_{item['id']}",
+                **{"class": f"level{level}"},
+                playOrder=str(play_order)
+            )
             nav_label = etree.SubElement(nav_point, "navLabel")
             text = etree.SubElement(nav_label, "text")
-            text.text = item["text"]
-            content = etree.SubElement(nav_point, "content",
-                                       src=f"dtbook.smil#smil_par_{item['id']}")
+            label_text = item.get("text") or " ".join(item.get("words", [])) or "제목 없음"
+            text.text = label_text
+            etree.SubElement(nav_point, "content",
+                             src=f"dtbook.smil#smil_par_{item['id']}")
 
-            # 계층 구조에 맞게 배치
-            if level == 1:
+            # 부모 찾기: 현재 레벨보다 작은 가장 가까운 상위 레벨
+            parent = None
+            for pl in range(level - 1, 0, -1):
+                if level_stack[pl] is not None:
+                    parent = level_stack[pl]
+                    break
+
+            if parent is None:
                 nav_map.append(nav_point)
-                current_level1_point = nav_point
-                current_level2_point = None
-                current_level3_point = None
-                current_level4_point = None
-                current_level5_point = None
-            elif level == 2 and current_level1_point is not None:
-                current_level1_point.append(nav_point)
-                current_level2_point = nav_point
-                current_level3_point = None
-                current_level4_point = None
-                current_level5_point = None
-            elif level == 3 and current_level2_point is not None:
-                current_level2_point.append(nav_point)
-                current_level3_point = nav_point
-                current_level4_point = None
-                current_level5_point = None
-            elif level == 4 and current_level3_point is not None:
-                current_level3_point.append(nav_point)
-                current_level4_point = nav_point
-                current_level5_point = None
-            elif level == 5 and current_level4_point is not None:
-                current_level4_point.append(nav_point)
-                current_level5_point = nav_point
-            elif level == 6 and current_level5_point is not None:
-                current_level5_point.append(nav_point)
+            else:
+                parent.append(nav_point)
+
+            # 스택 갱신
+            level_stack[level] = nav_point
+            for clr in range(level + 1, 7):
+                level_stack[clr] = None
 
             play_order += 1
 
