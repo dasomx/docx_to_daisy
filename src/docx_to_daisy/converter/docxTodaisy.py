@@ -1069,13 +1069,8 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                 current_level = 1
                 parent_elem = level1
 
-            # 표 요소 생성 (스타일 속성 추가)
-            table_elem = etree.SubElement(parent_elem, "table",
-                                   id=item["id"],
-                                   class_="data-table",
-                                   smilref=f"dtbook.smil#smil_par_{item['id']}",
-                                   border="1",
-                                   style="width: 100%; border-collapse: collapse; border: 3px double #000;")
+            # 표 요소 생성 (최소 속성만 유지: border)
+            table_elem = etree.SubElement(parent_elem, "table", border="1")
 
             table_data = item["table_data"]
 
@@ -1085,21 +1080,15 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             # 재귀 렌더링 함수 (문단/표 순서 보존)
             def render_table_to_dtbook(parent_tbody, table_data_obj, base_id):
                 for row_idx, row_data in enumerate(table_data_obj["rows"]):
-                    tr = etree.SubElement(parent_tbody, "tr",
-                                          id=f"row_{base_id}_{row_idx}",
-                                          style="border: 3px double #000;")
+                    tr = etree.SubElement(parent_tbody, "tr")
                     for col_idx, _ in enumerate(row_data):
                         cell_info = next((cell for cell in table_data_obj["cells"]
                                           if cell["row"] == row_idx and cell["col"] == col_idx), None)
                         if cell_info and cell_info.get("is_merged_area", False):
                             continue
 
-                        if col_idx == 0:
-                            cell_elem = etree.SubElement(tr, "th", scope="row",
-                                                         style="text-align: left; vertical-align: middle; font-weight: normal; border: 3px double #000;")
-                        else:
-                            cell_elem = etree.SubElement(tr, "td",
-                                                         style="text-align: left; vertical-align: middle; font-weight: normal; border: 3px double #000;")
+                        # 모든 셀을 td로 생성하며, 병합 속성만 유지
+                        cell_elem = etree.SubElement(tr, "td")
 
                         if cell_info and cell_info["is_merged"]:
                             if cell_info["rowspan"] > 1:
@@ -1116,8 +1105,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                                     cell_elem,
                                     "p",
                                     id=f"table_{base_id}_cell_{row_idx}_{col_idx}_p_{seq_para_counter}",
-                                    smilref=f"dtbook.smil#smil_par_{base_id}_cell_{row_idx}_{col_idx}_p_{seq_para_counter}",
-                                    style="margin: 0; padding: 8px; text-align: left; vertical-align: middle; font-weight: normal;"
+                                    smilref=f"dtbook.smil#smil_par_{base_id}_cell_{row_idx}_{col_idx}_p_{seq_para_counter}"
                                 )
                                 if para_text.strip() == "<br/>":
                                     etree.SubElement(p, "br")
@@ -1125,9 +1113,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                                     p.text = para_text.strip()
                                 seq_para_counter += 1
                             elif s.get('type') == 'table':
-                                nested_table_elem = etree.SubElement(cell_elem, "table",
-                                                                     border="1",
-                                                                     style="width: 100%; border-collapse: collapse; border: 3px double #000;")
+                                nested_table_elem = etree.SubElement(cell_elem, "table", border="1")
                                 nested_tbody = etree.SubElement(nested_table_elem, "tbody")
                                 nested_base_id = f"{base_id}_cell_{row_idx}_{col_idx}_nested_{s_idx}"
                                 render_table_to_dtbook(nested_tbody, s.get('table_data', {}), nested_base_id)
@@ -1163,9 +1149,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                         # 중첩 표 재귀 렌더링
                         nested_tables = cell_info.get('nested_tables', []) if cell_info else []
                         for n_idx, nested_table_data in enumerate(nested_tables):
-                            nested_table_elem = etree.SubElement(cell_elem, "table",
-                                                                 border="1",
-                                                                 style="width: 100%; border-collapse: collapse; border: 3px double #000;")
+                            nested_table_elem = etree.SubElement(cell_elem, "table", border="1")
                             nested_tbody = etree.SubElement(nested_table_elem, "tbody")
                             nested_base_id = f"{base_id}_cell_{row_idx}_{col_idx}_nested_{n_idx}"
                             render_table_to_dtbook(nested_tbody, nested_table_data, nested_base_id)
@@ -1549,12 +1533,13 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             etree.SubElement(par, "text",
                            src=f"dtbook.xml#{item['id']}")
         else:
-            # 일반 콘텐츠 처리
-            par = etree.SubElement(root_seq, "par",
-                                 id=f"smil_par_{item['id']}",
-                                 **{"class": item["type"]})
-            etree.SubElement(par, "text",
-                           src=f"dtbook.xml#{item['id']}")
+            # 일반 콘텐츠 처리 (table은 루트 par 생성 생략)
+            if item["type"] != "table":
+                par = etree.SubElement(root_seq, "par",
+                                     id=f"smil_par_{item['id']}",
+                                     **{"class": item["type"]})
+                etree.SubElement(par, "text",
+                               src=f"dtbook.xml#{item['id']}")
 
         # 표 처리
         if item["type"] == "table":
