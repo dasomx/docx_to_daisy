@@ -975,7 +975,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     # 페이지 관련 메타데이터 추가
     etree.SubElement(head, "meta",
                      name="dtb:totalPageCount",
-                     content=str(total_pages))
+                     content=str(max_page_number))
     etree.SubElement(head, "meta",
                      name="dtb:maxPageNumber",
                      content=str(max_page_number))
@@ -1501,7 +1501,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     # 페이지 관련 메타데이터 추가
     etree.SubElement(head, "meta",
                      name="dtb:totalPageCount",
-                     content=str(total_pages))
+                     content=str(max_page_number))
     etree.SubElement(head, "meta",
                      name="dtb:maxPageNumber",
                      content=str(max_page_number))
@@ -1658,7 +1658,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                      content=str(min(6, max_heading_level)))
     etree.SubElement(head, "meta",
                      name="dtb:totalPageCount",
-                     content=str(total_pages))
+                     content=str(max_page_number))
     etree.SubElement(head, "meta",
                      name="dtb:maxPageNumber",
                      content=str(max_page_number))
