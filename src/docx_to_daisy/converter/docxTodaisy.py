@@ -375,6 +375,9 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                 if not processed_text.strip():
                     continue
 
+            # 페이지 마커는 별도 요소로 처리했으므로 본문 마커 목록에서는 제거
+            markers = [m for m in markers if m.type != "page"]
+
             element_counter += 1
             sent_counter += 1
             elem_id = f"p_{element_counter}"
@@ -904,18 +907,20 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     total_pages = 0
     max_page_number = 0
     
-    # 모든 마커를 한 번에 수집하여 페이지 정보 계산
-    all_markers = []
+    # pagenum 요소 기준으로 페이지 정보 계산 (중복 방지)
+    page_values = []
     for item in content_structure:
-        all_markers.extend(item.get("markers", []))
-    
-    page_markers = [marker for marker in all_markers if marker.type == "page"]
-    total_pages = len(page_markers)
-    
-    for marker in page_markers:
+        if item.get("type") == "pagenum":
+            val = str(item.get("text", "")).strip()
+            if val:
+                page_values.append(val)
+
+    total_pages = len(page_values)
+
+    # 최대 숫자 페이지 계산 (로마 숫자 등 비숫자 표기는 제외)
+    for value in page_values:
         # 페이지 마커 값이 "1", "0-9", "8.1" 등 다양한 포맷일 수 있으므로
         # 규칙: '-'는 마지막 숫자 세그먼트, '.'는 첫 숫자 세그먼트를 페이지 번호로 본다.
-        value = marker.value
         page_num = None
         if '-' in value:
             nums = re.findall(r'\d+', value)
