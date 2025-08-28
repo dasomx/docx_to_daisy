@@ -1047,7 +1047,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                                  alt=item["alt_text"])
             
             # 이미지 크기를 적절히 설정
-            img.set("width", "100%")
+            img.set("width", "60%")
             img.set("height", "auto")
             
             # 이미지 캡션 추가
