@@ -12,6 +12,7 @@ from lxml import etree  # lxml 라이브러리
 from datetime import datetime
 from docx_to_daisy.markers import MarkerProcessor  # 마커 처리기 임포트
 import gc
+from docx.table import Table as DocxTable
 from docx_to_daisy.converter.utils import find_all_images, split_text_to_words, analyze_image_context, html_escape, BR_PATTERN, TABLE_TITLE_PATTERN
 from docx_to_daisy.converter.validator import DaisyValidator, ValidationResult
 
@@ -119,17 +120,18 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
         }
         element_type_map[pid] = 'paragraph'
         element_parent_map[pid] = para._element.getparent()
-    # 표 인덱싱
-    for table_idx, table in enumerate(document.tables):
+    # 표/셀 인덱싱 (중첩 표까지 포함)
+    def index_table(table, table_idx_hint=0):
         tid = id(table._element)
         table_id_map[tid] = {
-            'index': table_idx,
+            'index': table_idx_hint,
             'object': table,
             'parent': table._element.getparent()
         }
         element_type_map[tid] = 'table'
         element_parent_map[tid] = table._element.getparent()
-        # 셀 인덱싱 (표 내부)
+
+        # 셀 인덱싱 및 중첩 표 재귀 인덱싱
         for row in table.rows:
             for cell in row.cells:
                 cid = id(cell._element)
@@ -140,6 +142,16 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                 }
                 element_type_map[cid] = 'cell'
                 element_parent_map[cid] = cell._element.getparent()
+
+                # 셀 내부 중첩 표 인덱싱
+                try:
+                    for nested_idx, nested_table in enumerate(getattr(cell, 'tables', []) or []):
+                        index_table(nested_table, nested_idx)
+                except Exception:
+                    pass
+
+    for table_idx, table in enumerate(document.tables):
+        index_table(table, table_idx)
 
     # 2. 이미지가 어느 표/셀/단락에 속하는지 O(1)로 판별할 수 있도록 parent chain을 미리 저장
     def get_ancestor_type_and_id(element):
@@ -401,7 +413,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     print(f"단락 처리 완료: 총 {len(content_structure)}개의 구조 요소 생성")
     timings["parse_paragraphs"] = time.time() - t_paragraphs
 
-    # 표 처리
+    # ======== 표 처리 ========
     t_tables = time.time()
     print("표 처리 중...")
     
@@ -423,21 +435,19 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     if len(document.tables) > 0:
         print(f"문서에 {len(document.tables)}개의 표 발견")
         
-        # 셀 병합 정보 미리 계산 (그리드 기준으로 정확 처리)
-        cell_merge_info = {}
-        for table_idx, table in enumerate(document.tables):
-            tid = id(table._element)
-            cell_merge_info[tid] = {}
+        # 병합 정보 계산 및 표 데이터 추출 헬퍼
+        def compute_cell_merge_info_for_table(table_obj):
+            """주어진 표에 대한 병합 정보를 계산하여 반환합니다."""
+            info_map = {}
 
             # 1) 실제 XML tc 기준으로 각 행의 그리드 세그먼트 수집
-            row_segments = []  # [ [ {grid_start, grid_end, colspan, v_state}, ... ], ... ]
-            for row_idx, row in enumerate(table.rows):
+            row_segments = []
+            for row_idx, row in enumerate(table_obj.rows):
                 segments = []
                 g = 0
                 try:
                     tc_list = list(row._tr.tc_lst)
                 except Exception:
-                    # fallback: 고수준 셀에서 tc 추출 (중복 가능)
                     tc_list = []
                     seen = set()
                     for c in row.cells:
@@ -449,9 +459,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                     try:
                         tc_pr = tc.get_or_add_tcPr()
                     except Exception:
-                        # 일부 케이스 방어적 처리
                         tc_pr = getattr(tc, 'tcPr', None)
-                    # gridSpan
                     colspan = 1
                     try:
                         grid_span = tc_pr.find(qn('w:gridSpan')) if tc_pr is not None else None
@@ -459,7 +467,6 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                             colspan = int(grid_span.get(qn('w:val')))
                     except Exception:
                         pass
-                    # vMerge 상태
                     v_state = None
                     try:
                         v_merge = tc_pr.find(qn('w:vMerge')) if tc_pr is not None else None
@@ -468,7 +475,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                             if v_val == 'restart':
                                 v_state = 'restart'
                             else:
-                                v_state = 'continue'  # 값 없음 또는 'continue'
+                                v_state = 'continue'
                     except Exception:
                         pass
 
@@ -484,11 +491,9 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                 row_segments.append(segments)
 
             # 2) top-left 매핑, rowspan/colspan 계산
-            top_left_of = {}   # (r, g) -> (r0, g0)
-            width_map = {}     # (r0, g0) -> colspan
-            rowspan_map = {}   # (r0, g0) -> rowspan
-
-            # 초기: 같은 행의 가로 병합 반영(top-left는 행의 grid_start)
+            top_left_of = {}
+            width_map = {}
+            rowspan_map = {}
             for r, segs in enumerate(row_segments):
                 for seg in segs:
                     gs, ge = seg['grid_start'], seg['grid_end']
@@ -496,7 +501,6 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                         top_left_of[(r, gg)] = (r, gs)
                     width_map[(r, gs)] = seg['colspan']
 
-            # 세로 병합 확장(restart 기준으로 아래로 내려가며 continue 병합)
             for r0, segs in enumerate(row_segments):
                 for seg in segs:
                     if seg['v_state'] == 'restart':
@@ -504,7 +508,6 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                         rs = 1
                         rr = r0 + 1
                         while rr < len(row_segments):
-                            # rr 행에서 grid_start를 덮는 세그먼트 찾기
                             target = None
                             for s in row_segments[rr]:
                                 if s['grid_start'] <= gs <= s['grid_end']:
@@ -512,10 +515,8 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                                     break
                             if target is None:
                                 break
-                            # 계속 병합인지 확인(None 또는 'continue'를 계속으로 간주)
-                            if target['v_state'] in (None, 'continue'):
+                            if target['v_state'] == 'continue':
                                 rs += 1
-                                # 폭(gs..ge)을 rr행에 마킹
                                 for gg in range(gs, ge + 1):
                                     top_left_of[(rr, gg)] = (r0, gs)
                                 rr += 1
@@ -523,27 +524,266 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                                 break
                         rowspan_map[(r0, gs)] = rs
 
-            # 3) (row_idx, col_idx)별 병합 정보 생성 (col_idx를 grid index로 취급)
-            for r, row in enumerate(table.rows):
+            # 3) (row_idx, col_idx)별 병합 정보 생성
+            for r, row in enumerate(table_obj.rows):
                 num_cols = len(row.cells)
                 for c in range(num_cols):
                     tl = top_left_of.get((r, c), (r, c))
                     if tl == (r, c):
                         colspan = width_map.get(tl, 1)
                         rowspan = rowspan_map.get(tl, 1)
-                        cell_merge_info[tid][(r, c)] = {
+                        info_map[(r, c)] = {
                             'rowspan': rowspan,
                             'colspan': colspan,
                             'is_merged': (rowspan > 1 or colspan > 1),
                             'is_merged_area': False
                         }
                     else:
-                        cell_merge_info[tid][(r, c)] = {
+                        info_map[(r, c)] = {
                             'rowspan': 1,
                             'colspan': 1,
                             'is_merged': False,
                             'is_merged_area': True
                         }
+            return info_map
+
+        def extract_table_data_from_xml(tbl_el):
+            """w:tbl Element(XML)에서 표 데이터를 직접 추출합니다. 문단/중첩표 순서 보존 및 병합 반영."""
+            W_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+            data = {
+                'rows': [],
+                'cols': [],
+                'cells': [],
+                'images': []
+            }
+
+            # 1) 병합 정보 계산
+            row_segments = []
+            for tr in tbl_el.iterfind('./{%s}tr' % W_NS):
+                segments = []
+                g = 0
+                tcs = list(tr.iterfind('./{%s}tc' % W_NS))
+                for tc in tcs:
+                    tc_pr = tc.find('{%s}tcPr' % W_NS)
+                    colspan = 1
+                    v_state = None
+                    if tc_pr is not None:
+                        grid_span = tc_pr.find('{%s}gridSpan' % W_NS)
+                        if grid_span is not None:
+                            val = grid_span.get('{%s}val' % W_NS)
+                            if val:
+                                try:
+                                    colspan = int(val)
+                                except Exception:
+                                    colspan = 1
+                        v_merge = tc_pr.find('{%s}vMerge' % W_NS)
+                        if v_merge is not None:
+                            v_val = v_merge.get('{%s}val' % W_NS)
+                            if v_val == 'restart':
+                                v_state = 'restart'
+                            else:
+                                v_state = 'continue'
+                    seg = {'grid_start': g, 'grid_end': g + colspan - 1, 'colspan': colspan, 'v_state': v_state}
+                    segments.append(seg)
+                    g += colspan
+                row_segments.append(segments)
+
+            top_left_of = {}
+            width_map = {}
+            rowspan_map = {}
+            for r, segs in enumerate(row_segments):
+                for seg in segs:
+                    gs, ge = seg['grid_start'], seg['grid_end']
+                    for gg in range(gs, ge + 1):
+                        top_left_of[(r, gg)] = (r, gs)
+                    width_map[(r, gs)] = seg['colspan']
+            for r0, segs in enumerate(row_segments):
+                for seg in segs:
+                    if seg['v_state'] == 'restart':
+                        gs, ge = seg['grid_start'], seg['grid_end']
+                        rs = 1
+                        rr = r0 + 1
+                        while rr < len(row_segments):
+                            target = None
+                            for s in row_segments[rr]:
+                                if s['grid_start'] <= gs <= s['grid_end']:
+                                    target = s
+                                    break
+                            if target is None:
+                                break
+                            if target['v_state'] == 'continue':
+                                rs += 1
+                                for gg in range(gs, ge + 1):
+                                    top_left_of[(rr, gg)] = (r0, gs)
+                                rr += 1
+                            else:
+                                break
+                        rowspan_map[(r0, gs)] = rs
+
+            # 2) 행/셀 수집 (문단/표 순서 보존)
+            for r_idx, tr in enumerate(tbl_el.iterfind('./{%s}tr' % W_NS)):
+                row_texts = []
+                tcs = list(tr.iterfind('./{%s}tc' % W_NS))
+                for c_idx, tc in enumerate(tcs):
+                    # 문단 텍스트 나열 (row_texts용)
+                    p_texts = []
+                    for p in tc.iterfind('./{%s}p' % W_NS):
+                        p_texts.append(''.join((t.text or '') for t in p.iterfind('.//{%s}t' % W_NS)))
+                    row_texts.append(' '.join(p_texts))
+
+                    # 셀 병합 정보
+                    tl = top_left_of.get((r_idx, c_idx), (r_idx, c_idx))
+                    if tl == (r_idx, c_idx):
+                        colspan = width_map.get(tl, 1)
+                        rowspan = rowspan_map.get(tl, 1)
+                        is_merged = (rowspan > 1 or colspan > 1)
+                        is_merged_area = False
+                    else:
+                        colspan = 1
+                        rowspan = 1
+                        is_merged = False
+                        is_merged_area = True
+
+                    # 셀 content_sequence 구성
+                    content_sequence = []
+                    for child in tc.iterchildren():
+                        lname = etree.QName(child).localname if hasattr(etree, 'QName') else child.tag.split('}')[-1]
+                        if lname == 'p':
+                            text_val = ''.join((t.text or '') for t in child.iterfind('.//{%s}t' % W_NS))
+                            content_sequence.append({'type': 'p', 'text': text_val})
+                        elif lname == 'tbl':
+                            nested_data = extract_table_data_from_xml(child)
+                            content_sequence.append({'type': 'table', 'table_data': nested_data})
+
+                    data['cells'].append({
+                        'row': r_idx,
+                        'col': c_idx,
+                        'text': row_texts[-1] if row_texts else '',
+                        'is_merged': is_merged,
+                        'rowspan': rowspan,
+                        'colspan': colspan,
+                        'is_merged_area': is_merged_area,
+                        'cell_id': None,
+                        'images': [],
+                        'paragraphs': p_texts,
+                        'content_sequence': content_sequence
+                    })
+                data['rows'].append(row_texts)
+
+            # 3) 열 데이터
+            if data['rows']:
+                num_cols = max(len(r) for r in data['rows'])
+                for col_idx in range(num_cols):
+                    col_vals = []
+                    for rr in data['rows']:
+                        if col_idx < len(rr):
+                            col_vals.append(rr[col_idx])
+                    data['cols'].append(col_vals)
+
+            return data
+
+        def extract_table_data(table_obj):
+            """표 데이터를 추출하고, 셀 내부의 중첩 표도 재귀적으로 추출합니다."""
+            data = {
+                'rows': [],
+                'cols': [],
+                'cells': [],
+                'images': []
+            }
+            merge_info_map = compute_cell_merge_info_for_table(table_obj)
+
+            # 행/셀 데이터
+            for row_idx, row in enumerate(table_obj.rows):
+                row_data = []
+                for col_idx, cell in enumerate(row.cells):
+                    para_texts = [para.text for para in cell.paragraphs]
+                    cell_text = " ".join(para_texts)
+                    row_data.append(cell_text)
+
+                    cid = id(cell._element)
+                    cell_images_in_cell = cell_images_map.get(cid, [])
+
+                    mi = merge_info_map.get((row_idx, col_idx), {
+                        'rowspan': 1,
+                        'colspan': 1,
+                        'is_merged': False,
+                        'is_merged_area': False
+                    })
+
+                    # 셀 내 콘텐츠 순서 보존: 단순 XML 스캔 (p/tbl, sdt 포함)
+                    content_sequence = []
+                    try:
+                        W_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+                        logger.info(f"[InnerTable] 셀({row_idx},{col_idx}) 블록 스캔 시작")
+                        p_count = 0
+                        tbl_count = 0
+ 
+                        def iter_block_children(tc_el):
+                            for child in tc_el.iterchildren():
+                                lname = etree.QName(child).localname if hasattr(etree, 'QName') else child.tag.split('}')[-1]
+                                if lname in ('p', 'tbl'):
+                                    yield child
+                                elif lname == 'sdt':
+                                    sdt_content = child.find('.//{%s}sdtContent' % W_NS)
+                                    if sdt_content is not None:
+                                        for sub in sdt_content.iterchildren():
+                                            lname2 = etree.QName(sub).localname if hasattr(etree, 'QName') else sub.tag.split('}')[-1]
+                                            if lname2 in ('p', 'tbl'):
+                                                yield sub
+
+                        prev_p_text = None
+                        for child in iter_block_children(cell._element):
+                            localname = etree.QName(child).localname if hasattr(etree, 'QName') else child.tag.split('}')[-1]
+                            if localname == 'p':
+                                text_val = ''.join((t.text or '') for t in child.iterfind('.//{%s}t' % W_NS))
+                                # 연속 중복 문단 제거
+                                if prev_p_text is None or prev_p_text != text_val:
+                                    content_sequence.append({'type': 'p', 'text': text_val})
+                                    p_count += 1
+                                    prev_p_text = text_val
+                            elif localname == 'tbl':
+                                logger.info(f"[InnerTable] 셀({row_idx},{col_idx}) 내부표 감지 (XML)")
+                                nested_data = extract_table_data_from_xml(child)
+                                content_sequence.append({'type': 'table', 'table_data': nested_data})
+                                tbl_count += 1
+
+                        # 표 총계 기록 (직속 및 sdtContent 내부)
+                        extra_tbls = list(cell._element.iterfind('./{%s}tbl' % W_NS))
+                        for sdt in cell._element.iterfind('.//{%s}sdtContent' % W_NS):
+                            extra_tbls.extend(list(sdt.iterfind('./{%s}tbl' % W_NS)))
+                        logger.info(f"[InnerTable] 셀({row_idx},{col_idx}) 완료: p={p_count}, tbl={tbl_count}, tbl(xpath)={len(extra_tbls)}")
+
+                    except Exception as e:
+                        logger.info(f"[InnerTable] 셀({row_idx},{col_idx}) 스캔 예외: {e}")
+                        for t in para_texts:
+                            content_sequence.append({'type': 'p', 'text': t})
+
+                    data['cells'].append({
+                        'row': row_idx,
+                        'col': col_idx,
+                        'text': cell_text,
+                        'is_merged': mi['is_merged'],
+                        'rowspan': mi['rowspan'],
+                        'colspan': mi['colspan'],
+                        'is_merged_area': mi['is_merged_area'],
+                        'cell_id': cid,
+                        'images': cell_images_in_cell,
+                        'paragraphs': para_texts,
+                        'content_sequence': content_sequence
+                    })
+
+                data['rows'].append(row_data)
+
+            # 열 데이터
+            for col_idx in range(len(table_obj.columns)):
+                col_data = []
+                for row in table_obj.rows:
+                    if col_idx < len(row.cells):
+                        cell_text = " ".join(para.text for para in row.cells[col_idx].paragraphs)
+                        col_data.append(cell_text)
+                data['cols'].append(col_data)
+
+            return data
         
         for table_idx, table in enumerate(document.tables, 1):
             print(f"표 {table_idx} 처리 중...")
@@ -552,13 +792,8 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             elem_id = f"table_{element_counter}"
             sent_id = f"sent_{sent_counter}"
             
-            # 표 데이터 추출
-            table_data = {
-                "rows": [],
-                "cols": [],
-                "cells": [],
-                "images": []  # 표 안의 이미지 정보 추가
-            }
+            # 표 데이터 추출 (중첩 표 포함)
+            table_data = extract_table_data(table)
             
             # 표 안의 이미지 찾기 (인덱싱 구조 활용)
             tid = id(table._element)
@@ -566,48 +801,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             
             print(f"표 {table_idx} 안에 {len(this_table_images)}개의 이미지 발견")
             
-            # 행과 열 정보 추출
-            for row_idx, row in enumerate(table.rows):
-                row_data = []
-                for col_idx, cell in enumerate(row.cells):
-                    cell_text = " ".join(para.text for para in cell.paragraphs)
-                    row_data.append(cell_text)
-                    
-                    # 셀 안의 이미지 찾기 (인덱싱 구조 활용)
-                    cid = id(cell._element)
-                    cell_images_in_cell = cell_images_map.get(cid, [])
-                    
-                    # 미리 계산된 셀 병합 정보 사용 (좌표 기반)
-                    merge_info = cell_merge_info[tid].get((row_idx, col_idx), {
-                        'rowspan': 1,
-                        'colspan': 1,
-                        'is_merged': False,
-                        'is_merged_area': False
-                    })
-                    
-                    # 셀 정보 저장 (이미지 정보 포함)
-                    table_data["cells"].append({
-                        "row": row_idx,
-                        "col": col_idx,
-                        "text": cell_text,
-                        "is_merged": merge_info['is_merged'],
-                        "rowspan": merge_info['rowspan'],
-                        "colspan": merge_info['colspan'],
-                        "is_merged_area": merge_info['is_merged_area'],
-                        "cell_id": cid,  # 셀 ID 추가
-                        "images": cell_images_in_cell  # 셀 안의 이미지들
-                    })
-                
-                table_data["rows"].append(row_data)
-            
-            # 열 정보 추출
-            for col_idx in range(len(table.columns)):
-                col_data = []
-                for row in table.rows:
-                    if col_idx < len(row.cells):
-                        cell_text = " ".join(para.text for para in row.cells[col_idx].paragraphs)
-                        col_data.append(cell_text)
-                table_data["cols"].append(col_data)
+            # (행/열 정보는 extract_table_data에서 수집됨)
             
             # 표 위치 계산 (개선된 로직)
             table_document_position = 0
@@ -686,7 +880,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
         del element_parent_map
     if 'element_type_map' in locals():
         del element_type_map
-    # image_relations는 DAISY 파일 생성에서 사용되므로 나중에 정리
+    # image_relations는 이후 OPF, DTBook 단계에서도 사용되므로 유지
     gc.collect()
 
     # 콘텐츠를 위치에 따라 정렬 - 이미지와 텍스트의 정확한 순서 보장
@@ -874,115 +1068,109 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                 level_elements[1] = level1
                 current_level = 1
                 parent_elem = level1
-            
+
             # 표 요소 생성 (스타일 속성 추가)
-            table_elem = etree.SubElement(parent_elem, "table", 
+            table_elem = etree.SubElement(parent_elem, "table",
                                    id=item["id"],
                                    class_="data-table",
                                    smilref=f"dtbook.smil#smil_par_{item['id']}",
                                    border="1",
                                    style="width: 100%; border-collapse: collapse; border: 3px double #000;")
-            
-            # 표 데이터 가져오기
+
             table_data = item["table_data"]
-            
-            # 표 번호 가져오기
-            table_number = item.get("table_number", 1)  # 기본값 1로 설정
-            
-            # 원본 테이블 ID 가져오기 (병합 정보 확인용)
-            original_table_id = item.get("original_table_id")
-            
+
             # tbody 요소 생성
             tbody = etree.SubElement(table_elem, "tbody")
-            
-            # 표 데이터로 행과 열 생성
-            for row_idx, row_data in enumerate(table_data["rows"]):
-                tr = etree.SubElement(tbody, "tr", 
-                                    id=f"forsmil-{element_counter+row_idx}",
-                                    smilref=f"dtbook.smil#smil_par_{item['id']}_cell_{row_idx}",
-                                    style="border: 3px double #000;")
-                
-                for col_idx, cell_text in enumerate(row_data):
-                    # 셀 정보 찾기
-                    cell_info = next((cell for cell in table_data["cells"] 
-                                    if cell["row"] == row_idx and cell["col"] == col_idx), None)
-                    
-                    # 병합된 영역에 속하는 셀인지 확인
-                    if cell_info and cell_info.get("is_merged_area", False):
-                        # 병합된 영역에 속하므로 건너뛰기
-                        continue
-                    
-                    # 셀 요소 생성 (스타일 속성 추가)
-                    if col_idx == 0:
-                        cell_elem = etree.SubElement(tr, "th", scope="row",
-                                                   id=f"forsmil-{element_counter+row_idx*10+col_idx}",
-                                                   smilref=f"dtbook.smil#smil_par_{item['id']}_cell_{row_idx}_{col_idx}",
-                                                   style="text-align: left; vertical-align: middle; font-weight: normal; border: 3px double #000;")
-                    else:
-                        cell_elem = etree.SubElement(tr, "td",
-                                                   id=f"forsmil-{element_counter+row_idx*10+col_idx}",
-                                                   smilref=f"dtbook.smil#smil_par_{item['id']}_cell_{row_idx}_{col_idx}",
-                                                   style="text-align: left; vertical-align: middle; font-weight: normal; border: 3px double #000;")
-                    
-                    # 병합 속성 설정 (병합된 셀인 경우에만)
-                    if cell_info and cell_info["is_merged"]:
-                        if cell_info["rowspan"] > 1:
-                            cell_elem.set("rowspan", str(cell_info["rowspan"]))
-                        if cell_info["colspan"] > 1:
-                            cell_elem.set("colspan", str(cell_info["colspan"]))
-                    
-                    # 셀 내용 추가: 텍스트와 이미지 모두 처리
-                    p = etree.SubElement(
-                        cell_elem,
-                        "p",
-                        id=f"table_{item['id']}_cell_{row_idx}_{col_idx}",
-                        smilref=f"dtbook.smil#smil_par_{item['id']}_cell_{row_idx}_{col_idx}",
-                        style="margin: 0; padding: 8px; text-align: left; vertical-align: middle; font-weight: normal;"
-                    )
-                    
-                    # 셀 안의 이미지가 있는지 확인
-                    cell_info = next((cell for cell in table_data["cells"] 
-                                    if cell["row"] == row_idx and cell["col"] == col_idx), None)
-                    
-                    if cell_info and cell_info.get("images"):
-                        # 이미지가 있는 경우 이미지 먼저 추가
-                        for img_idx, img in enumerate(cell_info["images"]):
-                            # 이미지 파일 저장
-                            image_counter += 1
-                            img_num = str(image_counter)
-                            image_ext = ".jpeg"
-                            try:
-                                if 'image_rid' in img:
-                                    rel = image_relations.get(img['image_rid'])  # 미리 수집한 관계 사용
-                                    if rel and hasattr(rel, 'target_ref'):
-                                        ext = os.path.splitext(rel.target_ref)[1]
-                                        if ext:
-                                            image_ext = ext
-                            except:
-                                pass
-                            
-                            image_filename = f"table_{item['id']}_cell_{row_idx}_{col_idx}_img_{img_idx}{image_ext}"
-                            image_path = os.path.join(output_dir, image_filename)
-                            
-                            # 이미지 데이터 저장
-                            with open(image_path, "wb") as img_file:
-                                img_file.write(img['image_data'])
-                            
-                            # 이미지 요소 생성
-                            img_elem = etree.SubElement(p, "img",
-                                                      src=image_filename,
-                                                      alt=f"표 {item['table_number']} 셀 이미지 {img_idx+1}")
-                            img_elem.set("width", "100%")
-                            img_elem.set("height", "auto")
-                            
-                            # 이미지 다음에 줄바꿈 추가
-                            br_elem = etree.SubElement(p, "br")
-                    
-                    # 텍스트 추가
-                    if cell_text.strip() == "<br/>":
-                        br_elem = etree.SubElement(p, "br")
-                    elif cell_text.strip():
-                        p.text = cell_text.strip()
+
+            # 재귀 렌더링 함수 (문단/표 순서 보존)
+            def render_table_to_dtbook(parent_tbody, table_data_obj, base_id):
+                for row_idx, row_data in enumerate(table_data_obj["rows"]):
+                    tr = etree.SubElement(parent_tbody, "tr",
+                                          id=f"row_{base_id}_{row_idx}",
+                                          style="border: 3px double #000;")
+                    for col_idx, _ in enumerate(row_data):
+                        cell_info = next((cell for cell in table_data_obj["cells"]
+                                          if cell["row"] == row_idx and cell["col"] == col_idx), None)
+                        if cell_info and cell_info.get("is_merged_area", False):
+                            continue
+
+                        if col_idx == 0:
+                            cell_elem = etree.SubElement(tr, "th", scope="row",
+                                                         style="text-align: left; vertical-align: middle; font-weight: normal; border: 3px double #000;")
+                        else:
+                            cell_elem = etree.SubElement(tr, "td",
+                                                         style="text-align: left; vertical-align: middle; font-weight: normal; border: 3px double #000;")
+
+                        if cell_info and cell_info["is_merged"]:
+                            if cell_info["rowspan"] > 1:
+                                cell_elem.set("rowspan", str(cell_info["rowspan"]))
+                            if cell_info["colspan"] > 1:
+                                cell_elem.set("colspan", str(cell_info["colspan"]))
+
+                        seq = cell_info.get('content_sequence', []) if cell_info else []
+                        seq_para_counter = 0
+                        for s_idx, s in enumerate(seq):
+                            if s.get('type') == 'p':
+                                para_text = s.get('text', '')
+                                p = etree.SubElement(
+                                    cell_elem,
+                                    "p",
+                                    id=f"table_{base_id}_cell_{row_idx}_{col_idx}_p_{seq_para_counter}",
+                                    smilref=f"dtbook.smil#smil_par_{base_id}_cell_{row_idx}_{col_idx}_p_{seq_para_counter}",
+                                    style="margin: 0; padding: 8px; text-align: left; vertical-align: middle; font-weight: normal;"
+                                )
+                                if para_text.strip() == "<br/>":
+                                    etree.SubElement(p, "br")
+                                elif para_text.strip():
+                                    p.text = para_text.strip()
+                                seq_para_counter += 1
+                            elif s.get('type') == 'table':
+                                nested_table_elem = etree.SubElement(cell_elem, "table",
+                                                                     border="1",
+                                                                     style="width: 100%; border-collapse: collapse; border: 3px double #000;")
+                                nested_tbody = etree.SubElement(nested_table_elem, "tbody")
+                                nested_base_id = f"{base_id}_cell_{row_idx}_{col_idx}_nested_{s_idx}"
+                                render_table_to_dtbook(nested_tbody, s.get('table_data', {}), nested_base_id)
+
+                        # 셀 이미지 출력 (문단/표 외부에 인라인 이미지가 잡힌 경우)
+                        if cell_info and cell_info.get("images"):
+                            for img_idx, img in enumerate(cell_info["images"]):
+                                nonlocal image_counter
+                                image_counter += 1
+                                image_ext = ".jpeg"
+                                try:
+                                    if 'image_rid' in img:
+                                        rel = image_relations.get(img['image_rid'])
+                                        if rel and hasattr(rel, 'target_ref'):
+                                            ext = os.path.splitext(rel.target_ref)[1]
+                                            if ext:
+                                                image_ext = ext
+                                except Exception:
+                                    pass
+
+                                image_filename = f"table_{base_id}_cell_{row_idx}_{col_idx}_img_{img_idx}{image_ext}"
+                                image_path = os.path.join(output_dir, image_filename)
+                                with open(image_path, "wb") as img_file:
+                                    img_file.write(img['image_data'])
+
+                                img_elem = etree.SubElement(cell_elem, "img",
+                                                            src=image_filename,
+                                                            alt=f"표 셀 이미지 {img_idx+1}")
+                                img_elem.set("width", "100%")
+                                img_elem.set("height", "auto")
+                                etree.SubElement(cell_elem, "br")
+
+                        # 중첩 표 재귀 렌더링
+                        nested_tables = cell_info.get('nested_tables', []) if cell_info else []
+                        for n_idx, nested_table_data in enumerate(nested_tables):
+                            nested_table_elem = etree.SubElement(cell_elem, "table",
+                                                                 border="1",
+                                                                 style="width: 100%; border-collapse: collapse; border: 3px double #000;")
+                            nested_tbody = etree.SubElement(nested_table_elem, "tbody")
+                            nested_base_id = f"{base_id}_cell_{row_idx}_{col_idx}_nested_{n_idx}"
+                            render_table_to_dtbook(nested_tbody, nested_table_data, nested_base_id)
+
+            render_table_to_dtbook(tbody, table_data, item['id'])
         elif item["type"].startswith("h"):
             level = int(item["type"][1])  # h1 -> 1, h2 -> 2, h3 -> 3, h4 -> 4, h5 -> 5, h6 -> 6
 
@@ -1230,45 +1418,48 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                              id=image_id,
                              **{"media-type": mime_type})
     
-    # 표 안의 이미지 파일들도 매니페스트에 추가
+    # 표 안의 이미지 파일들도 매니페스트에 추가 (중첩 표 재귀 지원)
+    def add_table_images_to_manifest(table_data_obj, base_id):
+        for cell in table_data_obj["cells"]:
+            if cell.get("images"):
+                for img_idx, img in enumerate(cell["images"]):
+                    image_ext = ".jpeg"
+                    try:
+                        if 'image_rid' in img:
+                            rel = image_relations.get(img['image_rid'])
+                            if rel and hasattr(rel, 'target_ref'):
+                                ext = os.path.splitext(rel.target_ref)[1]
+                                if ext:
+                                    image_ext = ext
+                    except Exception:
+                        pass
+                    image_filename = f"table_{base_id}_cell_{cell['row']}_{cell['col']}_img_{img_idx}{image_ext}"
+                    image_id = f"img_table_{base_id}_cell_{cell['row']}_{cell['col']}_{img_idx}"
+                    extension = os.path.splitext(image_filename)[1][1:].lower()
+                    mime_type = {
+                        'jpg': 'image/jpeg',
+                        'jpeg': 'image/jpeg',
+                        'png': 'image/png',
+                        'gif': 'image/gif',
+                        'bmp': 'image/bmp',
+                        'tiff': 'image/tiff',
+                        'tif': 'image/tiff'
+                    }.get(extension, f'image/{extension}')
+                    print(f"표 안 이미지 매니페스트 추가: {image_filename} (MIME: {mime_type})")
+                    etree.SubElement(manifest, "item",
+                                     href=image_filename,
+                                     id=image_id,
+                                     **{"media-type": mime_type})
+
+            # 중첩 표 재귀 처리: content_sequence 기반
+            for s_idx, s in enumerate(cell.get('content_sequence', []) or []):
+                if s.get('type') == 'table':
+                    nested_base_id = f"{base_id}_cell_{cell['row']}_{cell['col']}_nested_{s_idx}"
+                    add_table_images_to_manifest(s.get('table_data', {}), nested_base_id)
+
     for item in content_structure:
         if item["type"] == "table":
-            table_data = item["table_data"]
-            for cell in table_data["cells"]:
-                if cell.get("images"):
-                    for img_idx, img in enumerate(cell["images"]):
-                        # 이미지 파일명 생성 (미리 수집한 이미지 관계 정보 활용)
-                        image_ext = ".jpeg"
-                        try:
-                            if 'image_rid' in img:
-                                rel = image_relations.get(img['image_rid'])  # 미리 수집한 관계 사용
-                                if rel and hasattr(rel, 'target_ref'):
-                                    ext = os.path.splitext(rel.target_ref)[1]
-                                    if ext:
-                                        image_ext = ext
-                        except:
-                            pass
-                        
-                        image_filename = f"table_{item['id']}_cell_{cell['row']}_{cell['col']}_img_{img_idx}{image_ext}"
-                        image_id = f"img_table_{item['id']}_cell_{cell['row']}_{cell['col']}_{img_idx}"
-                        extension = os.path.splitext(image_filename)[1][1:].lower()
-
-                        # 이미지 확장자에 따른 MIME 타입 설정
-                        mime_type = {
-                            'jpg': 'image/jpeg',
-                            'jpeg': 'image/jpeg',
-                            'png': 'image/png',
-                            'gif': 'image/gif',
-                            'bmp': 'image/bmp',
-                            'tiff': 'image/tiff',
-                            'tif': 'image/tiff'
-                        }.get(extension, f'image/{extension}')
-
-                        print(f"표 안 이미지 매니페스트 추가: {image_filename} (MIME: {mime_type})")
-                        etree.SubElement(manifest, "item",
-                                         href=image_filename,
-                                         id=image_id,
-                                         **{"media-type": mime_type})
+            add_table_images_to_manifest(item["table_data"], item['id'])
 
     # OPF 파일 저장
     opf_filepath = os.path.join(output_dir, "dtbook.opf")
@@ -1368,19 +1559,30 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
         # 표 처리
         if item["type"] == "table":
             table_data = item["table_data"]
-            for row_idx, row_data in enumerate(table_data["rows"]):
-                for col_idx, cell_text in enumerate(row_data):
-                    # 병합 영역 셀은 SMIL에서도 생성하지 않음
-                    cell_info = next((cell for cell in table_data["cells"]
-                                      if cell["row"] == row_idx and cell["col"] == col_idx), None)
-                    if cell_info and cell_info.get("is_merged_area", False):
-                        continue
 
-                    cell_par = etree.SubElement(root_seq, "par",
-                                              id=f"smil_par_{item['id']}_cell_{row_idx}_{col_idx}",
-                                              **{"class": "table-cell"})
-                    etree.SubElement(cell_par, "text",
-                                   src=f"dtbook.xml#table_{item['id']}_cell_{row_idx}_{col_idx}")
+            def render_table_to_smil(parent_seq, table_data_obj, base_id):
+                for row_idx, row_data in enumerate(table_data_obj["rows"]):
+                    for col_idx, _ in enumerate(row_data):
+                        cell_info = next((cell for cell in table_data_obj["cells"]
+                                          if cell["row"] == row_idx and cell["col"] == col_idx), None)
+                        if cell_info and cell_info.get("is_merged_area", False):
+                            continue
+
+                        seq = cell_info.get('content_sequence', []) if cell_info else []
+                        para_counter = 0
+                        for s_idx, s in enumerate(seq):
+                            if s.get('type') == 'p':
+                                cell_par = etree.SubElement(parent_seq, "par",
+                                                            id=f"smil_par_{base_id}_cell_{row_idx}_{col_idx}_p_{para_counter}",
+                                                            **{"class": "table-cell"})
+                                etree.SubElement(cell_par, "text",
+                                                 src=f"dtbook.xml#table_{base_id}_cell_{row_idx}_{col_idx}_p_{para_counter}")
+                                para_counter += 1
+                            elif s.get('type') == 'table':
+                                nested_base_id = f"{base_id}_cell_{row_idx}_{col_idx}_nested_{s_idx}"
+                                render_table_to_smil(parent_seq, s.get('table_data', {}), nested_base_id)
+
+            render_table_to_smil(root_seq, table_data, item['id'])
 
         # 마커 처리 (페이지 마커 제외)
         for marker in item.get("markers", []):
