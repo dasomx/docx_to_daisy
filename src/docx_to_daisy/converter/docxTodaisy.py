@@ -375,6 +375,9 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                 if not processed_text.strip():
                     continue
 
+            # 페이지 마커는 별도 요소로 처리했으므로 본문 마커 목록에서는 제거
+            markers = [m for m in markers if m.type != "page"]
+
             element_counter += 1
             sent_counter += 1
             elem_id = f"p_{element_counter}"
@@ -904,18 +907,20 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     total_pages = 0
     max_page_number = 0
     
-    # 모든 마커를 한 번에 수집하여 페이지 정보 계산
-    all_markers = []
+    # pagenum 요소 기준으로 페이지 정보 계산 (중복 방지)
+    page_values = []
     for item in content_structure:
-        all_markers.extend(item.get("markers", []))
-    
-    page_markers = [marker for marker in all_markers if marker.type == "page"]
-    total_pages = len(page_markers)
-    
-    for marker in page_markers:
+        if item.get("type") == "pagenum":
+            val = str(item.get("text", "")).strip()
+            if val:
+                page_values.append(val)
+
+    total_pages = len(page_values)
+
+    # 최대 숫자 페이지 계산 (로마 숫자 등 비숫자 표기는 제외)
+    for value in page_values:
         # 페이지 마커 값이 "1", "0-9", "8.1" 등 다양한 포맷일 수 있으므로
         # 규칙: '-'는 마지막 숫자 세그먼트, '.'는 첫 숫자 세그먼트를 페이지 번호로 본다.
-        value = marker.value
         page_num = None
         if '-' in value:
             nums = re.findall(r'\d+', value)
@@ -970,7 +975,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     # 페이지 관련 메타데이터 추가
     etree.SubElement(head, "meta",
                      name="dtb:totalPageCount",
-                     content=str(total_pages))
+                     content=str(max_page_number))
     etree.SubElement(head, "meta",
                      name="dtb:maxPageNumber",
                      content=str(max_page_number))
@@ -1023,10 +1028,8 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             # 이미지는 현재 활성 레벨 요소에 추가
             parent_elem = level_elements.get(current_level, dtbook_bodymatter)
             if parent_elem is dtbook_bodymatter:
-                # level1이 없는 경우 생성
-                level1 = etree.SubElement(dtbook_bodymatter, "level1",
-                                        id=item["id"],
-                                        smilref=f"dtbook.smil#smil_par_{item['id']}")
+                # level1이 없는 경우 생성 (표 전용: smilref/id 부여하지 않음)
+                level1 = etree.SubElement(dtbook_bodymatter, "level1")
                 h1 = etree.SubElement(level1, "h1")
                 h1.text = "제목 없음"
                 level_elements[1] = level1
@@ -1044,7 +1047,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                                  alt=item["alt_text"])
             
             # 이미지 크기를 적절히 설정
-            img.set("width", "100%")
+            img.set("width", "60%")
             img.set("height", "auto")
             
             # 이미지 캡션 추가
@@ -1071,9 +1074,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
 
             # 표 요소 생성 (스타일 속성 추가)
             table_elem = etree.SubElement(parent_elem, "table",
-                                   id=item["id"],
                                    class_="data-table",
-                                   smilref=f"dtbook.smil#smil_par_{item['id']}",
                                    border="1",
                                    style="width: 100%; border-collapse: collapse; border: 3px double #000;")
 
@@ -1086,7 +1087,6 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             def render_table_to_dtbook(parent_tbody, table_data_obj, base_id):
                 for row_idx, row_data in enumerate(table_data_obj["rows"]):
                     tr = etree.SubElement(parent_tbody, "tr",
-                                          id=f"row_{base_id}_{row_idx}",
                                           style="border: 3px double #000;")
                     for col_idx, _ in enumerate(row_data):
                         cell_info = next((cell for cell in table_data_obj["cells"]
@@ -1094,12 +1094,8 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                         if cell_info and cell_info.get("is_merged_area", False):
                             continue
 
-                        if col_idx == 0:
-                            cell_elem = etree.SubElement(tr, "th", scope="row",
-                                                         style="text-align: left; vertical-align: middle; font-weight: normal; border: 3px double #000;")
-                        else:
-                            cell_elem = etree.SubElement(tr, "td",
-                                                         style="text-align: left; vertical-align: middle; font-weight: normal; border: 3px double #000;")
+                        cell_elem = etree.SubElement(tr, "td",
+                                                    style="text-align: left; vertical-align: middle; font-weight: normal; border: 3px double #000;")
 
                         if cell_info and cell_info["is_merged"]:
                             if cell_info["rowspan"] > 1:
@@ -1505,7 +1501,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
     # 페이지 관련 메타데이터 추가
     etree.SubElement(head, "meta",
                      name="dtb:totalPageCount",
-                     content=str(total_pages))
+                     content=str(max_page_number))
     etree.SubElement(head, "meta",
                      name="dtb:maxPageNumber",
                      content=str(max_page_number))
@@ -1549,12 +1545,13 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
             etree.SubElement(par, "text",
                            src=f"dtbook.xml#{item['id']}")
         else:
-            # 일반 콘텐츠 처리
-            par = etree.SubElement(root_seq, "par",
-                                 id=f"smil_par_{item['id']}",
-                                 **{"class": item["type"]})
-            etree.SubElement(par, "text",
-                           src=f"dtbook.xml#{item['id']}")
+            # 일반 콘텐츠 처리 (table은 별도 처리하므로 건너뜀)
+            if item["type"] != "table":
+                par = etree.SubElement(root_seq, "par",
+                                     id=f"smil_par_{item['id']}",
+                                     **{"class": item["type"]})
+                etree.SubElement(par, "text",
+                               src=f"dtbook.xml#{item['id']}")
 
         # 표 처리
         if item["type"] == "table":
@@ -1572,12 +1569,14 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                         para_counter = 0
                         for s_idx, s in enumerate(seq):
                             if s.get('type') == 'p':
-                                cell_par = etree.SubElement(parent_seq, "par",
-                                                            id=f"smil_par_{base_id}_cell_{row_idx}_{col_idx}_p_{para_counter}",
-                                                            **{"class": "table-cell"})
-                                etree.SubElement(cell_par, "text",
-                                                 src=f"dtbook.xml#table_{base_id}_cell_{row_idx}_{col_idx}_p_{para_counter}")
-                                para_counter += 1
+                                # 빈 문단은 SMIL 생성에서 제외
+                                if (s.get('text') or '').strip():
+                                    cell_par = etree.SubElement(parent_seq, "par",
+                                                                id=f"smil_par_{base_id}_cell_{row_idx}_{col_idx}_p_{para_counter}",
+                                                                **{"class": "p"})
+                                    etree.SubElement(cell_par, "text",
+                                                     src=f"dtbook.xml#table_{base_id}_cell_{row_idx}_{col_idx}_p_{para_counter}")
+                                    para_counter += 1
                             elif s.get('type') == 'table':
                                 nested_base_id = f"{base_id}_cell_{row_idx}_{col_idx}_nested_{s_idx}"
                                 render_table_to_smil(parent_seq, s.get('table_data', {}), nested_base_id)
@@ -1659,7 +1658,7 @@ def create_daisy_book(docx_file_path, output_dir, book_title=None, book_author=N
                      content=str(min(6, max_heading_level)))
     etree.SubElement(head, "meta",
                      name="dtb:totalPageCount",
-                     content=str(total_pages))
+                     content=str(max_page_number))
     etree.SubElement(head, "meta",
                      name="dtb:maxPageNumber",
                      content=str(max_page_number))
