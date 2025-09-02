@@ -29,6 +29,7 @@ from .tasks import (
     process_docx_to_daisy_and_epub_task,
 )
 from .websocket import status_listener, manager
+from .redis_client import get_redis_connection
 from .events import start_event_listener, stop_event_listener
 
 # 로깅 설정
@@ -88,10 +89,10 @@ async def shutdown_event():
 # CORS 설정
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 모든 출처 허용 (프로덕션에서는 특정 출처만 허용하는 것이 좋습니다)
+    allow_origins=["https://hasang.dasomx.com"],  # 모든 출처 허용 (프로덕션에서는 특정 출처만 허용하는 것이 좋습니다)
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Accept", "Origin", "X-Requested-With"],
 )
 
 # Redis 연결 정보
@@ -112,22 +113,9 @@ RESULTS_DIR.mkdir(exist_ok=True)
 # 작업 상태 (Redis에 저장되지만 여기서는 메모리에 임시 저장)
 job_statuses: Dict[str, Any] = {}
 
-def get_redis_connection():
-    """Redis 연결을 생성하고 반환합니다."""
+def _ping_or_503(conn: redis.Redis):
     try:
-        redis_conn = redis.Redis(
-            host=REDIS_HOST,
-            port=REDIS_PORT,
-            db=REDIS_DB,
-            password=REDIS_PASSWORD,
-            socket_connect_timeout=5,
-            socket_timeout=5,
-            retry_on_timeout=True,
-            health_check_interval=30
-        )
-        # 연결 테스트
-        redis_conn.ping()
-        return redis_conn
+        conn.ping()
     except redis.ConnectionError as e:
         logger.error(f"Redis 연결 실패: {str(e)}")
         raise HTTPException(status_code=503, detail=f"Redis 서버에 연결할 수 없습니다: {str(e)}")
@@ -138,7 +126,9 @@ def get_redis_connection():
 def get_queue():
     """RQ 큐를 생성하고 반환합니다."""
     try:
-        return Queue(QUEUE_NAME, connection=get_redis_connection())
+        conn = get_redis_connection()
+        _ping_or_503(conn)
+        return Queue(QUEUE_NAME, connection=conn)
     except Exception as e:
         logger.error(f"큐 생성 실패: {str(e)}") 
         raise HTTPException(status_code=503, detail=f"작업 큐를 생성할 수 없습니다: {str(e)}")

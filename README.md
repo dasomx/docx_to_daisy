@@ -1,16 +1,18 @@
-# DOCX to DAISY 변환기
+# DOCX to DAISY/EPUB3 변환기
 
 Microsoft Word 문서(DOCX)를 DAISY 형식으로 변환하는 파이썬 도구입니다.
 
 ## 기능
 
-- DOCX 파일을 DAISY 2.02 형식으로 변환
-- 문서의 제목과 단락 구조 보존
-- 제목 수준(Heading 1-3) 지원
-- DAISY 표준 준수 (DTBook, NCX, SMIL, OPF, Resources)
-- 특수 마커를 통한 페이지, 각주, 사이드바 등 지원
-- ZIP 압축 지원
-- REST API 지원
+- DOCX → DAISY 2.02 변환 (DTBook, NCX, SMIL, OPF, Resources)
+- DOCX → EPUB3 변환 지원
+- 단일 요청으로 DAISY ZIP + EPUB3를 동시에 생성하는 파이프라인
+- DAISY ZIP → EPUB3 변환 지원
+- 제목/단락 구조 보존, Heading 수준(1~3) 처리
+- 특수 마커(페이지, 각주, 사이드바 등) 처리
+- RQ 기반 비동기 처리 및 작업 우선순위(priority) 지원
+- WebSocket 실시간 진행률/상태 알림(`/ws/task/{task_id}`)
+- 큐/워커 운영 API 제공(`/queue/status`, `/queue/clear`, `/queue/retry-failed`)
 
 ## 설치
 
@@ -25,16 +27,34 @@ venv\Scripts\activate  # Windows
 pip install -e .
 ```
 
-## 사용법
+## 빠른 시작
 
-### API 사용법
+### Docker Compose
 
-#### 1. 변환 요청 (POST /convert)
+```bash
+docker compose up -d --build
+# API: http://localhost:8000
+```
+
+기본 환경 변수:
+
+- `REDIS_HOST` (기본: `redis`)
+- `REDIS_PORT` (기본: `6379`)
+- `REDIS_DB` (기본: `0`)
+- `QUEUE_NAME` (기본: `daisy_queue`)
+- `MAX_WORKERS` (기본: `6`)
+
+### 로컬 설치 (개발용)
+
+## API 사용법
+
+### 1) DOCX → DAISY 변환 (POST /convert)
 
 DOCX 파일을 업로드하여 DAISY 변환 작업을 시작합니다.
 
 **요청:**
-```
+
+```http
 POST /convert
 Content-Type: multipart/form-data
 
@@ -46,6 +66,7 @@ language: ko (기본값)
 ```
 
 **응답:**
+
 ```json
 {
   "task_id": "f513056f-4cc7-405a-8051-b0f4f471c73c",
@@ -54,16 +75,18 @@ language: ko (기본값)
 }
 ```
 
-#### 2. 작업 상태 확인 (GET /task/{task_id})
+### 2) 작업 상태 확인 (GET /task/{task_id})
 
 변환 작업의 상태를 확인합니다.
 
 **요청:**
-```
+
+```http
 GET /task/f513056f-4cc7-405a-8051-b0f4f471c73c
 ```
 
 **응답:**
+
 ```json
 {
   "task_id": "f513056f-4cc7-405a-8051-b0f4f471c73c",
@@ -80,24 +103,26 @@ GET /task/f513056f-4cc7-405a-8051-b0f4f471c73c
 ```
 
 **가능한 상태값:**
+
 - `queued`: 작업이 큐에 등록되어 대기 중
 - `started`: 작업이 처리 중
 - `finished`: 작업이 완료됨
 - `failed`: 작업이 실패함
 
-#### 3. 결과 다운로드 (GET /download/{task_id})
+### 3) DAISY 결과 다운로드 (GET /download/{task_id})
 
 변환 작업이 완료된 후, 결과 ZIP 파일을 다운로드합니다.
 
 **요청:**
-```
+
+```http
 GET /download/f513056f-4cc7-405a-8051-b0f4f471c73c
 ```
 
 **응답:**
 ZIP 파일이 다운로드됩니다.
 
-#### 4. 웹소켓으로 실시간 상태 모니터링 (WebSocket /ws/task/{task_id})
+### 4) 웹소켓 실시간 상태 (WebSocket /ws/task/{task_id})
 
 작업 상태를 실시간으로 모니터링하기 위한 웹소켓 연결입니다.
 
@@ -292,12 +317,59 @@ async function startConversion() {
   }
 }
 ```
-#### 5. 일괄 변환 요청 (POST /convert-batch)
+
+### 5) 일괄 변환 (POST /convert-batch)
+
+### 6) DOCX → EPUB3 (POST /convert-epub3)
+
+```http
+POST /convert-epub3
+Content-Type: multipart/form-data
+
+file: <DOCX 파일>
+title/author/publisher/language: 선택
+```
+
+응답 예시는 `/convert`와 동일한 형태(`task_id`, `status`, `message`).
+
+### 7) DOCX → DAISY → EPUB3 파이프라인 (POST /convert-docx-to-daisy-and-epub3)
+
+```http
+POST /convert-docx-to-daisy-and-epub3
+Content-Type: multipart/form-data
+
+file: <DOCX 파일>
+title/author/publisher/language: 선택
+priority: 1..10 (선택)
+```
+
+완료 시 두 개의 다운로드 URL이 제공됩니다:
+
+```json
+{
+  "download_urls": {
+    "daisy": "/download/{task_id}",
+    "epub3": "/download-epub/{task_id}"
+  }
+}
+```
+
+### 8) DAISY ZIP → EPUB3 (POST /convert-daisy-to-epub)
+
+```http
+POST /convert-daisy-to-epub
+Content-Type: multipart/form-data
+
+file: <DAISY ZIP>
+```
+
+다운로드: `GET /download-daisy-to-epub/{task_id}`
 
 여러 DOCX 파일을 한 번에 업로드하여 DAISY 변환 작업을 시작합니다.
 
 **요청:**
-```
+
+```http
 POST /convert-batch
 Content-Type: multipart/form-data
 
@@ -309,6 +381,7 @@ language: ko (기본값)
 ```
 
 **응답:**
+
 ```json
 {
   "total": 3,
@@ -337,6 +410,7 @@ language: ko (기본값)
 ```
 
 **참고사항:**
+
 - 한 번에 최대 10개의 파일을 처리할 수 있습니다.
 - 제목(title)이 제공되면 "제목 - 파일명" 형식으로 각 파일에 적용됩니다.
 - 모든 파일에 동일한 저자와 출판사 정보가 적용됩니다.
@@ -443,6 +517,8 @@ function displayBatchResults(data) {
   
   resultsContainer.appendChild(tasksList);
 }
+```
+
 
 ## 생성되는 파일
 
@@ -451,6 +527,12 @@ function displayBatchResults(data) {
 - `navigation.ncx`: 네비게이션 컨트롤 파일
 - `mo0.smil`: 텍스트 동기화 정보
 - `resources.res`: 리소스 정보
+
+## 운영/관리 API
+
+- `GET /queue/status`: 큐 길이, 워커 상태, 시스템 리소스
+- `GET /queue/clear`: 대기 작업 비우기
+- `GET /queue/retry-failed`: 실패 작업 재시도
 
 ## 제한사항
 
@@ -481,17 +563,20 @@ MIT License
 ### API 서버 실행
 
 ```bash
-docx-to-daisy-api --redis-host localhost --redis-port 6379
+docx-to-daisy-api --host 0.0.0.0 --port 8000 \
+  --redis-host localhost --redis-port 6379 --redis-db 0 --queue-name daisy_queue
 ```
 
 ### 워커 실행
 
 ```bash
-docx-to-daisy-worker --redis-host localhost --redis-port 6379 --workers 2
+docx-to-daisy-worker --workers 2
+# 자동 스케일링(코어 수 기준): --auto-scale
+# 풀 모드(복수 프로세스): --pool --workers 4
 ```
 
 ### Docker로 실행
 
 ```bash
-docker-compose up --build
+docker compose up -d --build
 ```

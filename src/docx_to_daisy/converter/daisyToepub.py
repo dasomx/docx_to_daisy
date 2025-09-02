@@ -455,6 +455,92 @@ def extract_text_content(element, dtbook_ns):
     
     return ' '.join(filter(None, [part.strip() for part in text_parts]))
 
+def render_dtbook_table_recursive(table_elem, dtbook_ns, file_index=0):
+    """DTBook <table> 요소를 EPUB3용 XHTML 문자열로 재귀 렌더링합니다.
+
+    - caption -> <caption>
+    - tbody/tr/th|td 순회
+    - 셀 내부에서 <p>와 중첩 <table>을 원본 순서대로 처리
+    - rowspan/colspan 유지
+    """
+    content = ""
+
+    table_id = table_elem.get('id', f'table_f{file_index}_auto')
+    content += f"""
+      <table id="{table_id}">"""
+
+    caption_elem = table_elem.find(f"{{{dtbook_ns}}}caption")
+    if caption_elem is not None:
+        caption_text = extract_text_content(caption_elem, dtbook_ns)
+        if caption_text:
+            content += f"""
+        <caption>{html.escape(caption_text)}</caption>"""
+
+    tbody = table_elem.find(f"{{{dtbook_ns}}}tbody")
+    if tbody is not None:
+        tbody_id = tbody.get('id', f'tbody_f{file_index}_auto')
+        content += f"""
+        <tbody id="{tbody_id}">"""
+
+        for row_idx, tr in enumerate(tbody.findall(f"{{{dtbook_ns}}}tr")):
+            tr_id = tr.get('id', f'tr_f{file_index}_{row_idx}')
+            content += f"""
+          <tr id="{tr_id}">"""
+
+            for cell_idx, cell in enumerate(tr):
+                if not cell.tag.endswith(('th', 'td')):
+                    continue
+
+                cell_id = cell.get('id', f'cell_f{file_index}_{row_idx}_{cell_idx}')
+
+                # 셀 내용: 자식 요소 순서 보존 (p와 table 모두 처리)
+                cell_inner = ""
+                for sub in list(cell):
+                    tag_ends = sub.tag.split('}')[-1] if '}' in sub.tag else sub.tag
+                    if tag_ends == 'p':
+                        p_id = sub.get('id', f'table_{table_id}_cell_{row_idx}_{cell_idx}')
+                        p_text = extract_text_content(sub, dtbook_ns)
+                        cell_inner += f"""
+                <p id="{p_id}">{html.escape(p_text)}</p>"""
+                    elif tag_ends == 'table':
+                        # 내부표 재귀 렌더링
+                        nested_html = render_dtbook_table_recursive(sub, dtbook_ns, file_index)
+                        cell_inner += nested_html
+
+                # 비어있으면 셀 자체 텍스트 사용
+                if not cell_inner:
+                    cell_text = extract_text_content(cell, dtbook_ns)
+                    if cell_text:
+                        p_id = f'table_{table_id}_cell_{row_idx}_{cell_idx}'
+                        cell_inner = f"""
+                <p id="{p_id}">{html.escape(cell_text)}</p>"""
+
+                attrs = ''
+                if cell.get('rowspan'):
+                    attrs += f" rowspan=\"{cell.get('rowspan')}\""
+                if cell.get('colspan'):
+                    attrs += f" colspan=\"{cell.get('colspan')}\""
+
+                if cell.tag.endswith('th'):
+                    scope = 'row' if cell_idx == 0 else 'col'
+                    content += f"""
+            <th id="{cell_id}" scope="{scope}"{attrs}>{cell_inner}
+            </th>"""
+                else:
+                    content += f"""
+            <td id="{cell_id}"{attrs}>{cell_inner}
+            </td>"""
+
+            content += """
+          </tr>"""
+
+        content += """
+        </tbody>"""
+
+    content += """
+      </table>"""
+    return content
+
 def create_xhtml_from_nav_structure(target_element, file_index, title, dtbook_ns, book_title, book_language="ko"):
     """DTBook level 구조를 기반으로 XHTML를 생성합니다."""
     
@@ -706,13 +792,18 @@ def process_dtbook_level_content(element, dtbook_ns, file_index=0, level=1, skip
                             cell_id = cell.get('id', f'id_{cell_id_counter}')
                             cell_id_counter += 1
                             
-                            # 셀 내용 추출 (DAISY Pipeline은 셀 내부에 p 태그 사용)
+                            # 셀 내용 추출: p와 table을 원본 순서대로 처리
                             cell_content = ""
-                            for p in cell.findall(f"{{{dtbook_ns}}}p"):
-                                p_id = p.get('id', f'table_{table_id}_cell_{row_idx}_{cell_idx}')
-                                p_text = extract_text_content(p, dtbook_ns)
-                                cell_content += f'''
+                            for sub in list(cell):
+                                tag_ends = sub.tag.split('}')[-1] if '}' in sub.tag else sub.tag
+                                if tag_ends == 'p':
+                                    p_id = sub.get('id', f'table_{table_id}_cell_{row_idx}_{cell_idx}')
+                                    p_text = extract_text_content(sub, dtbook_ns)
+                                    cell_content += f'''
                 <p id="{p_id}">{html.escape(p_text)}</p>'''
+                                elif tag_ends == 'table':
+                                    nested_html = render_dtbook_table_recursive(sub, dtbook_ns, file_index)
+                                    cell_content += nested_html
                             
                             # 셀 내용이 없으면 직접 텍스트 사용
                             if not cell_content:
@@ -960,13 +1051,19 @@ def create_xhtml_from_level1(level1, file_index, dtbook_ns, book_title, book_lan
                             cell_id = cell.get('id', f'id_{cell_id_counter}')
                             cell_id_counter += 1
                             
-                            # 셀 내용 추출 (DAISY Pipeline은 셀 내부에 p 태그 사용)
+                            # 셀 내용 추출: p와 table을 원본 순서대로 처리
                             cell_content = ""
-                            for p in cell.findall(f"{{{dtbook_ns}}}p"):
-                                p_id = p.get('id', f'table_{table_id}_cell_{row_idx}_{cell_idx}')
-                                p_text = extract_text_content(p, dtbook_ns)
-                                cell_content += f'''
+                            for sub in list(cell):
+                                tag_ends = sub.tag.split('}')[-1] if '}' in sub.tag else sub.tag
+                                if tag_ends == 'p':
+                                    p_id = sub.get('id', f'table_{table_id}_cell_{row_idx}_{cell_idx}')
+                                    p_text = extract_text_content(sub, dtbook_ns)
+                                    xhtml_p = f'''
           <p id="{p_id}">{html.escape(p_text)}</p>'''
+                                    cell_content += xhtml_p
+                                elif tag_ends == 'table':
+                                    nested_html = render_dtbook_table_recursive(sub, dtbook_ns, file_index)
+                                    cell_content += nested_html
                             
                             # 셀 내용이 없으면 직접 텍스트 사용
                             if not cell_content:

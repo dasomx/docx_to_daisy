@@ -12,6 +12,7 @@ import time
 import json
 import zipfile
 from typing import Dict, Any, Optional
+from .redis_client import get_redis_connection
 
 from .converter.docxTodaisy import create_daisy_book, create_daisy_book_with_validation, zip_daisy_output
 from .converter.docxToepub import create_epub3_book
@@ -39,22 +40,11 @@ def update_job_progress(job_id: str, progress: int, message: str, meta: Optional
         meta (dict, optional): 추가 메타데이터
     """
     from rq.job import Job
-    from redis import Redis
     from redis.exceptions import ConnectionError, TimeoutError
-    import os
     
     # 현재 작업 객체 가져오기
     try:
-        redis_conn = Redis(
-            host=os.environ.get('REDIS_HOST', 'localhost'),
-            port=int(os.environ.get('REDIS_PORT', 6379)),
-            db=int(os.environ.get('REDIS_DB', 0)),
-            password=os.environ.get('REDIS_PASSWORD', None),
-            socket_connect_timeout=5,
-            socket_timeout=5,
-            retry_on_timeout=True,
-            health_check_interval=30
-        )
+        redis_conn = get_redis_connection()
         
         # Redis 연결 테스트
         redis_conn.ping()
