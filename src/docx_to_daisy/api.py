@@ -89,10 +89,10 @@ async def shutdown_event():
 # CORS 설정
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 모든 출처 허용 (프로덕션에서는 특정 출처만 허용하는 것이 좋습니다)
+    allow_origins=["https://hasang.dasomx.com"],  # 모든 출처 허용 (프로덕션에서는 특정 출처만 허용하는 것이 좋습니다)
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Accept", "Origin", "X-Requested-With"],
 )
 
 # Redis 연결 정보
