@@ -19,7 +19,7 @@ class MarkerProcessor:
 
     # 마커 패턴 정의
     MARKERS = {
-        'page': r'\$#((?:\d+|[IVXLCDMivxlcdm]+)(?:[.-](?:\d+|[IVXLCDMivxlcdm]+))?)',  # 페이지 마커: $#11, $#3-1, $#8.1, $#i, $#ii, $#iv-1
+        'page': r'(?:\$#|#\$|#[Pp])((?:\d+|[IVXLCDMivxlcdm]+)(?:[.-](?:\d+|[IVXLCDMivxlcdm]+))?)',  # 페이지 마커: $#11, #$3-1, #p8.1, #i, #iv-1
         'note': r'\$note\{([^}]+)\}',  # 각주 마커: $note{각주 내용}
         'sidebar': r'\$sidebar\{([^}]+)\}',  # 사이드바 마커: $sidebar{사이드바 내용}
         'annotation': r'\$annotation\{([^}]+)\}',  # 주석 마커: $annotation{주석 내용}
