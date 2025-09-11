@@ -14,6 +14,7 @@ from rq.job import Job
 
 from .tasks import JOB_META_PREFIX
 from .websocket import manager
+from .redis_client import get_blocking_redis_connection
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
@@ -41,15 +42,7 @@ class JobEventListener(threading.Thread):
         self.daemon = True
         
         # Redis 연결
-        if redis_conn is None:
-            self.redis_conn = redis.Redis(
-                host=REDIS_HOST,
-                port=REDIS_PORT,
-                db=REDIS_DB,
-                password=REDIS_PASSWORD
-            )
-        else:
-            self.redis_conn = redis_conn
+        self.redis_conn = redis_conn or get_blocking_redis_connection()
         
         # Pub/Sub 객체
         self.pubsub = self.redis_conn.pubsub()

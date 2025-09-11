@@ -11,6 +11,7 @@ import multiprocessing
 import uuid
 import time
 from rq import Worker, Queue, Connection
+from .redis_client import get_blocking_redis_connection
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO, 
@@ -25,19 +26,8 @@ REDIS_PASSWORD = os.environ.get('REDIS_PASSWORD', None)
 QUEUE_NAME = os.environ.get('QUEUE_NAME', 'daisy_queue')
 MAX_WORKERS = int(os.environ.get('MAX_WORKERS', 6))  # 최대 워커 수 (기본값: 6)
 
-def get_redis_connection():
-    """Redis 연결을 생성하고 반환합니다."""
-    return redis.Redis(
-        host=REDIS_HOST,
-        port=REDIS_PORT,
-        db=REDIS_DB,
-        password=REDIS_PASSWORD,
-        socket_connect_timeout=30,
-        socket_timeout=60,
-        retry_on_timeout=True,
-        max_connections=5,
-        decode_responses=False
-    )
+def _ping(conn: redis.Redis):
+    conn.ping()
 
 def start_worker(num_workers=1, worker_name=None):
     """RQ 워커를 시작합니다."""
@@ -46,7 +36,7 @@ def start_worker(num_workers=1, worker_name=None):
     
     while retry_count < max_retries:
         try:
-            redis_conn = get_redis_connection()
+            redis_conn = get_blocking_redis_connection()
             
             # Redis 연결 테스트
             redis_conn.ping()

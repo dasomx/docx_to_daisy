@@ -169,8 +169,8 @@ def create_epub3_book(docx_file_path, output_dir, book_title=None, book_author=N
         text_raw = para.text
         style_name = para.style.name.lower()
 
-        # <br/> 태그 기준으로 세그먼트를 분리
-        br_segments = re.split(r'<br\s*/?>', text_raw, flags=re.IGNORECASE)
+        # <br/> 또는 <hs/> 태그 기준으로 세그먼트를 분리
+        br_segments = re.split(r'<(?:br|hs)\s*/?>', text_raw, flags=re.IGNORECASE)
 
         # 세그먼트별 처리
         for seg_idx, seg_text in enumerate(br_segments):

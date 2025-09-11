@@ -16,7 +16,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # 컴파일된 정규식 패턴들 (성능 최적화)
-BR_PATTERN = re.compile(r'<br\s*/?>', flags=re.IGNORECASE)
+# <br/> 또는 <hs/> 를 동일하게 빈 문단 구분자로 처리
+BR_PATTERN = re.compile(r'<(?:br|hs)\s*/?>', flags=re.IGNORECASE)
 HTML_TAG_PATTERN = re.compile(r'<[^>]*>')
 PUNCTUATION_PATTERN = re.compile(r'[.。,，!！?？:：;；]')
 BRACKET_PATTERN = re.compile(r'\[(.*?)\]')
